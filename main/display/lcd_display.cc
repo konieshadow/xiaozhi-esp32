@@ -22,6 +22,10 @@ LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
 LV_FONT_DECLARE(font_awesome_30_4);
 
+#ifndef DISPLAY_ROUND_SAFE_STATUS_BAR
+#define DISPLAY_ROUND_SAFE_STATUS_BAR 0
+#endif
+
 void LcdDisplay::InitializeLcdThemes() {
     auto text_font = std::make_shared<LvglBuiltInFont>(&BUILTIN_TEXT_FONT);
     auto icon_font = std::make_shared<LvglBuiltInFont>(&BUILTIN_ICON_FONT);
@@ -365,6 +369,9 @@ void LcdDisplay::SetupUI() {
     auto text_font = lvgl_theme->text_font()->font();
     auto icon_font = lvgl_theme->icon_font()->font();
     auto large_icon_font = lvgl_theme->large_icon_font()->font();
+    const int safe_status_bar_width = DISPLAY_ROUND_SAFE_STATUS_BAR ? LV_HOR_RES * 58 / 100 : LV_HOR_RES;
+    const int safe_status_bar_y = DISPLAY_ROUND_SAFE_STATUS_BAR ? 40 : 0;
+    const int safe_status_bar_padding = DISPLAY_ROUND_SAFE_STATUS_BAR ? lvgl_theme->spacing(1) : lvgl_theme->spacing(4);
 
     auto screen = lv_screen_active();
     lv_obj_set_style_text_font(screen, text_font, 0);
@@ -384,7 +391,7 @@ void LcdDisplay::SetupUI() {
 
     /* Layer 1: Top bar - for status icons */
     top_bar_ = lv_obj_create(container_);
-    lv_obj_set_size(top_bar_, LV_HOR_RES, LV_SIZE_CONTENT);
+    lv_obj_set_size(top_bar_, safe_status_bar_width, LV_SIZE_CONTENT);
     lv_obj_set_style_radius(top_bar_, 0, 0);
     lv_obj_set_style_bg_opa(top_bar_, LV_OPA_50, 0);  // 50% opacity background
     lv_obj_set_style_bg_color(top_bar_, lvgl_theme->background_color(), 0);
@@ -392,11 +399,12 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_pad_all(top_bar_, 0, 0);
     lv_obj_set_style_pad_top(top_bar_, lvgl_theme->spacing(2), 0);
     lv_obj_set_style_pad_bottom(top_bar_, lvgl_theme->spacing(2), 0);
-    lv_obj_set_style_pad_left(top_bar_, lvgl_theme->spacing(4), 0);
-    lv_obj_set_style_pad_right(top_bar_, lvgl_theme->spacing(4), 0);
+    lv_obj_set_style_pad_left(top_bar_, safe_status_bar_padding, 0);
+    lv_obj_set_style_pad_right(top_bar_, safe_status_bar_padding, 0);
     lv_obj_set_flex_flow(top_bar_, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(top_bar_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollbar_mode(top_bar_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_align(top_bar_, LV_ALIGN_TOP_MID, 0, safe_status_bar_y);
 
     // Left icon
     network_label_ = lv_label_create(top_bar_);
@@ -424,9 +432,15 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_text_color(battery_label_, lvgl_theme->text_color(), 0);
     lv_obj_set_style_margin_left(battery_label_, lvgl_theme->spacing(2), 0);
 
+    battery_voltage_label_ = lv_label_create(right_icons);
+    lv_label_set_text(battery_voltage_label_, "");
+    lv_obj_set_style_text_font(battery_voltage_label_, text_font, 0);
+    lv_obj_set_style_text_color(battery_voltage_label_, lvgl_theme->text_color(), 0);
+    lv_obj_set_style_margin_left(battery_voltage_label_, lvgl_theme->spacing(1), 0);
+
     /* Layer 2: Status bar - for center text labels */
     status_bar_ = lv_obj_create(screen);
-    lv_obj_set_size(status_bar_, LV_HOR_RES, LV_SIZE_CONTENT);
+    lv_obj_set_size(status_bar_, safe_status_bar_width, LV_SIZE_CONTENT);
     lv_obj_set_style_radius(status_bar_, 0, 0);
     lv_obj_set_style_bg_opa(status_bar_, LV_OPA_TRANSP, 0);  // Transparent background
     lv_obj_set_style_border_width(status_bar_, 0, 0);
@@ -435,7 +449,7 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_pad_bottom(status_bar_, lvgl_theme->spacing(2), 0);
     lv_obj_set_scrollbar_mode(status_bar_, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_style_layout(status_bar_, LV_LAYOUT_NONE, 0);  // Use absolute positioning
-    lv_obj_align(status_bar_, LV_ALIGN_TOP_MID, 0, 0);  // Overlap with top_bar_
+    lv_obj_align(status_bar_, LV_ALIGN_TOP_MID, 0, safe_status_bar_y);  // Overlap with top_bar_
 
     notification_label_ = lv_label_create(status_bar_);
     lv_obj_set_width(notification_label_, LV_HOR_RES * 0.8);
@@ -814,6 +828,9 @@ void LcdDisplay::SetupUI() {
     auto text_font = lvgl_theme->text_font()->font();
     auto icon_font = lvgl_theme->icon_font()->font();
     auto large_icon_font = lvgl_theme->large_icon_font()->font();
+    const int safe_status_bar_width = DISPLAY_ROUND_SAFE_STATUS_BAR ? LV_HOR_RES * 58 / 100 : LV_HOR_RES;
+    const int safe_status_bar_y = DISPLAY_ROUND_SAFE_STATUS_BAR ? 40 : 0;
+    const int safe_status_bar_padding = DISPLAY_ROUND_SAFE_STATUS_BAR ? lvgl_theme->spacing(1) : lvgl_theme->spacing(4);
 
     auto screen = lv_screen_active();
     lv_obj_set_style_text_font(screen, text_font, 0);
@@ -854,7 +871,7 @@ void LcdDisplay::SetupUI() {
 
     /* Layer 1: Top bar - for status icons */
     top_bar_ = lv_obj_create(screen);
-    lv_obj_set_size(top_bar_, LV_HOR_RES, LV_SIZE_CONTENT);
+    lv_obj_set_size(top_bar_, safe_status_bar_width, LV_SIZE_CONTENT);
     lv_obj_set_style_radius(top_bar_, 0, 0);
     lv_obj_set_style_bg_opa(top_bar_, LV_OPA_50, 0);  // 50% opacity background
     lv_obj_set_style_bg_color(top_bar_, lvgl_theme->background_color(), 0);
@@ -862,12 +879,12 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_pad_all(top_bar_, 0, 0);
     lv_obj_set_style_pad_top(top_bar_, lvgl_theme->spacing(2), 0);
     lv_obj_set_style_pad_bottom(top_bar_, lvgl_theme->spacing(2), 0);
-    lv_obj_set_style_pad_left(top_bar_, lvgl_theme->spacing(4), 0);
-    lv_obj_set_style_pad_right(top_bar_, lvgl_theme->spacing(4), 0);
+    lv_obj_set_style_pad_left(top_bar_, safe_status_bar_padding, 0);
+    lv_obj_set_style_pad_right(top_bar_, safe_status_bar_padding, 0);
     lv_obj_set_flex_flow(top_bar_, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(top_bar_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollbar_mode(top_bar_, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_align(top_bar_, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_align(top_bar_, LV_ALIGN_TOP_MID, 0, safe_status_bar_y);
 
     // Left icon
     network_label_ = lv_label_create(top_bar_);
@@ -895,9 +912,15 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_text_color(battery_label_, lvgl_theme->text_color(), 0);
     lv_obj_set_style_margin_left(battery_label_, lvgl_theme->spacing(2), 0);
 
+    battery_voltage_label_ = lv_label_create(right_icons);
+    lv_label_set_text(battery_voltage_label_, "");
+    lv_obj_set_style_text_font(battery_voltage_label_, text_font, 0);
+    lv_obj_set_style_text_color(battery_voltage_label_, lvgl_theme->text_color(), 0);
+    lv_obj_set_style_margin_left(battery_voltage_label_, lvgl_theme->spacing(1), 0);
+
     /* Layer 2: Status bar - for center text labels */
     status_bar_ = lv_obj_create(screen);
-    lv_obj_set_size(status_bar_, LV_HOR_RES, LV_SIZE_CONTENT);
+    lv_obj_set_size(status_bar_, safe_status_bar_width, LV_SIZE_CONTENT);
     lv_obj_set_style_radius(status_bar_, 0, 0);
     lv_obj_set_style_bg_opa(status_bar_, LV_OPA_TRANSP, 0);  // Transparent background
     lv_obj_set_style_border_width(status_bar_, 0, 0);
@@ -906,7 +929,7 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_pad_bottom(status_bar_, lvgl_theme->spacing(2), 0);
     lv_obj_set_scrollbar_mode(status_bar_, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_style_layout(status_bar_, LV_LAYOUT_NONE, 0);  // Use absolute positioning
-    lv_obj_align(status_bar_, LV_ALIGN_TOP_MID, 0, 0);  // Overlap with top_bar_
+    lv_obj_align(status_bar_, LV_ALIGN_TOP_MID, 0, safe_status_bar_y);  // Overlap with top_bar_
 
     notification_label_ = lv_label_create(status_bar_);
     lv_obj_set_width(notification_label_, LV_HOR_RES * 0.75);
@@ -1171,6 +1194,9 @@ void LcdDisplay::SetTheme(Theme* theme) {
         lv_obj_set_style_text_font(battery_label_, icon_font, 0);
         lv_obj_set_style_text_font(network_label_, icon_font, 0);
     }
+    if (battery_voltage_label_ != nullptr) {
+        lv_obj_set_style_text_font(battery_voltage_label_, text_font, 0);
+    }
 
     // Set parent text color
     lv_obj_set_style_text_font(screen, text_font, 0);
@@ -1196,6 +1222,9 @@ void LcdDisplay::SetTheme(Theme* theme) {
     lv_obj_set_style_text_color(notification_label_, lvgl_theme->text_color(), 0);
     lv_obj_set_style_text_color(mute_label_, lvgl_theme->text_color(), 0);
     lv_obj_set_style_text_color(battery_label_, lvgl_theme->text_color(), 0);
+    if (battery_voltage_label_ != nullptr) {
+        lv_obj_set_style_text_color(battery_voltage_label_, lvgl_theme->text_color(), 0);
+    }
     lv_obj_set_style_text_color(emoji_label_, lvgl_theme->text_color(), 0);
 
     // If we have the chat message style, update all message bubbles

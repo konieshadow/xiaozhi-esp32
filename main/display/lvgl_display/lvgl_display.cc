@@ -1,6 +1,7 @@
 #include <esp_log.h>
 #include <esp_err.h>
 #include <string>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <font_awesome.h>
@@ -60,6 +61,9 @@ LvglDisplay::~LvglDisplay() {
     }
     if (battery_label_ != nullptr) {
         lv_obj_del(battery_label_);
+    }
+    if (battery_voltage_label_ != nullptr) {
+        lv_obj_del(battery_voltage_label_);
     }
     if( low_battery_popup_ != nullptr ) {
         lv_obj_del(low_battery_popup_);
@@ -172,6 +176,16 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
         if (battery_label_ != nullptr && battery_icon_ != icon) {
             battery_icon_ = icon;
             lv_label_set_text(battery_label_, battery_icon_);
+        }
+        if (battery_voltage_label_ != nullptr) {
+            float voltage = 0.0f;
+            if (board.GetBatteryVoltage(voltage)) {
+                char text[8];
+                snprintf(text, sizeof(text), "%.1f", voltage);
+                lv_label_set_text(battery_voltage_label_, text);
+            } else {
+                lv_label_set_text(battery_voltage_label_, "");
+            }
         }
 
         // Check low battery popup only when clock tick event is triggered

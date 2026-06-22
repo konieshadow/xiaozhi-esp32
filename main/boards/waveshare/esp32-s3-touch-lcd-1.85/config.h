@@ -10,6 +10,7 @@
 #define BOOT_BUTTON_GPIO        GPIO_NUM_0
 #define PWR_BUTTON_GPIO         GPIO_NUM_6
 #define PWR_Control_PIN         GPIO_NUM_7
+#define BATTERY_ADC_PIN         GPIO_NUM_8
 
 #define AUDIO_I2S_MIC_GPIO_WS   GPIO_NUM_2
 #define AUDIO_I2S_MIC_GPIO_SCK  GPIO_NUM_15

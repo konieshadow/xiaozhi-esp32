@@ -14,6 +14,9 @@
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_st77916.h>
 #include <esp_timer.h>
+#include <esp_adc/adc_cali.h>
+#include <esp_adc/adc_cali_scheme.h>
+#include <esp_adc/adc_oneshot.h>
 #include "esp_io_expander_tca9554.h"
 
 #define TAG "waveshare_lcd_1_85"
@@ -217,6 +220,10 @@ private:
     button_handle_t boot_btn, pwr_btn;
     button_driver_t* boot_btn_driver_ = nullptr;
     button_driver_t* pwr_btn_driver_ = nullptr;
+    adc_oneshot_unit_handle_t battery_adc_handle_ = nullptr;
+    adc_cali_handle_t battery_adc_cali_handle_ = nullptr;
+    bool battery_adc_calibrated_ = false;
+    float battery_voltage_ = 0.0f;
     static CustomBoard* instance_;
 
     void InitializeI2c() {
@@ -415,12 +422,68 @@ private:
         }, this);
     }
 
+    void InitializeBatteryAdc() {
+        adc_oneshot_unit_init_cfg_t init_config = {
+            .unit_id = ADC_UNIT_1,
+            .ulp_mode = ADC_ULP_MODE_DISABLE,
+        };
+        ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &battery_adc_handle_));
+
+        adc_oneshot_chan_cfg_t channel_config = {
+            .atten = ADC_ATTEN_DB_12,
+            .bitwidth = ADC_BITWIDTH_DEFAULT,
+        };
+        ESP_ERROR_CHECK(adc_oneshot_config_channel(battery_adc_handle_, ADC_CHANNEL_7, &channel_config));
+
+        adc_cali_curve_fitting_config_t cali_config = {
+            .unit_id = ADC_UNIT_1,
+            .chan = ADC_CHANNEL_7,
+            .atten = ADC_ATTEN_DB_12,
+            .bitwidth = ADC_BITWIDTH_DEFAULT,
+        };
+        esp_err_t ret = adc_cali_create_scheme_curve_fitting(&cali_config, &battery_adc_cali_handle_);
+        if (ret == ESP_OK) {
+            battery_adc_calibrated_ = true;
+        } else {
+            ESP_LOGW(TAG, "Battery ADC calibration unavailable, raw voltage will be estimated");
+        }
+    }
+
+    float ReadBatteryVoltage() {
+        if (battery_adc_handle_ == nullptr) {
+            return 0.0f;
+        }
+
+        int raw = 0;
+        int voltage_mv = 0;
+        ESP_ERROR_CHECK(adc_oneshot_read(battery_adc_handle_, ADC_CHANNEL_7, &raw));
+        if (battery_adc_calibrated_) {
+            ESP_ERROR_CHECK(adc_cali_raw_to_voltage(battery_adc_cali_handle_, raw, &voltage_mv));
+        } else {
+            voltage_mv = raw * 3300 / 4095;
+        }
+
+        battery_voltage_ = (voltage_mv * 3.0f / 1000.0f) / 0.9945f;
+        return battery_voltage_;
+    }
+
+    int BatteryVoltageToLevel(float voltage) {
+        if (voltage <= 3.30f) {
+            return 0;
+        }
+        if (voltage >= 4.20f) {
+            return 100;
+        }
+        return static_cast<int>((voltage - 3.30f) * 100.0f / (4.20f - 3.30f));
+    }
+
 public:
     CustomBoard() {   
         InitializeI2c();
         InitializeTca9554();
         InitializeSpi();
         Initializest77916Display();
+        InitializeBatteryAdc();
         InitializeButtons();
         GetBacklight()->RestoreBrightness();
     }
@@ -439,6 +502,18 @@ public:
     virtual Backlight* GetBacklight() override {
         static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
         return &backlight;
+    }
+
+    virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override {
+        level = BatteryVoltageToLevel(ReadBatteryVoltage());
+        charging = false;
+        discharging = true;
+        return true;
+    }
+
+    virtual bool GetBatteryVoltage(float& voltage) override {
+        voltage = battery_voltage_ > 0.0f ? battery_voltage_ : ReadBatteryVoltage();
+        return voltage > 0.0f;
     }
 };
 
