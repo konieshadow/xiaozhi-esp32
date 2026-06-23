@@ -60,6 +60,8 @@ voltage = (adc_mv * 3.0f / 1000.0f) / 0.9945f;
 
 Prefer adding optional battery capability through shared board interfaces, so boards without battery ADC can return `false` instead of inheriting Waveshare-specific behavior.
 
+When `CONFIG_USE_KIDS_ENGLISH_SERVER` is enabled, the main LCD UI shows a small gear-shaped debug entry near the right side of the screen. Tap it to open the debug menu. `开始/提交练习` toggles the Kids English practice flow, `设备信息` prints board/state/heap/UUID/battery details on screen, and `清空消息` clears the visible debug/chat messages. On the Waveshare ESP32-S3-Touch-LCD-1.85 this relies on the CST816 touch controller being registered with LVGL.
+
 ## Commit & Pull Request Guidelines
 
 Recent history uses concise subjects, often conventional prefixes such as `feat(scope): ...`, `fix(scope): ...`, or short imperative summaries like `add <board>`. Keep commits focused and mention the affected board or module when useful. Pull requests should include a clear description, target hardware, build command used, runtime test results, linked issues, and screenshots or serial logs for UI/display or boot behavior changes.

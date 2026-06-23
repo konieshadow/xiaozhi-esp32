@@ -26,6 +26,8 @@ protected:
     lv_obj_t* container_ = nullptr;
     lv_obj_t* side_bar_ = nullptr;
     lv_obj_t* bottom_bar_ = nullptr;
+    lv_obj_t* debug_button_ = nullptr;
+    lv_obj_t* debug_menu_ = nullptr;
     lv_obj_t* preview_image_ = nullptr;
     lv_obj_t* emoji_label_ = nullptr;
     lv_obj_t* emoji_image_ = nullptr;
@@ -37,6 +39,9 @@ protected:
     bool hide_subtitle_ = false;  // Control whether to hide chat messages/subtitles
 
     void InitializeLcdThemes();
+    void CreateDebugEntry();
+    void ToggleDebugMenu();
+    void HideDebugMenu();
     virtual bool Lock(int timeout_ms = 0) override;
     virtual void Unlock() override;
 

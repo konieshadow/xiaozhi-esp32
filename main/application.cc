@@ -678,6 +678,47 @@ void Application::StopListening() {
     xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING);
 }
 
+void Application::ShowDebugInfo() {
+    Schedule([this]() {
+        auto& board = Board::GetInstance();
+        auto display = board.GetDisplay();
+
+        int battery_level = 0;
+        bool charging = false;
+        bool discharging = false;
+        float voltage = 0.0f;
+        bool has_battery = board.GetBatteryLevel(battery_level, charging, discharging);
+        bool has_voltage = board.GetBatteryVoltage(voltage);
+
+        char message[256];
+        snprintf(message, sizeof(message),
+                 "Debug\nBoard: %s\nState: %d\nHeap: %u\nUUID: %.8s\nBattery: %s",
+                 BOARD_NAME, static_cast<int>(GetDeviceState()),
+                 static_cast<unsigned>(SystemInfo::GetFreeHeapSize()), board.GetUuid().c_str(),
+                 has_battery ? (has_voltage ? "ok" : "level") : "n/a");
+        display->SetChatMessage("system", message);
+
+        if (has_battery) {
+            char battery_message[64];
+            if (has_voltage) {
+                snprintf(battery_message, sizeof(battery_message), "Battery %d%% %.2fV",
+                         battery_level, voltage);
+            } else {
+                snprintf(battery_message, sizeof(battery_message), "Battery %d%%", battery_level);
+            }
+            display->ShowNotification(battery_message);
+        }
+    });
+}
+
+void Application::ClearDebugMessages() {
+    Schedule([]() {
+        auto display = Board::GetInstance().GetDisplay();
+        display->ClearChatMessages();
+        display->SetStatus(Lang::Strings::STANDBY);
+    });
+}
+
 void Application::HandleToggleChatEvent() {
     auto state = GetDeviceState();
     

@@ -3,6 +3,7 @@
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "assets/lang_config.h"
+#include "application.h"
 
 #include <vector>
 #include <algorithm>
@@ -11,12 +12,21 @@
 #include <esp_err.h>
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
+#include <cstdint>
 #include <cstring>
 #include <src/misc/cache/lv_cache.h>
 
 #include "board.h"
 
 #define TAG "LcdDisplay"
+
+namespace {
+enum class DebugMenuAction {
+    kTogglePractice = 1,
+    kShowInfo,
+    kClearMessages,
+};
+}  // namespace
 
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
@@ -322,6 +332,12 @@ LcdDisplay::~LcdDisplay() {
     if (bottom_bar_ != nullptr) {
         lv_obj_del(bottom_bar_);
     }
+    if (debug_menu_ != nullptr) {
+        lv_obj_del(debug_menu_);
+    }
+    if (debug_button_ != nullptr) {
+        lv_obj_del(debug_button_);
+    }
     if (status_bar_ != nullptr) {
         lv_obj_del(status_bar_);
     }
@@ -352,6 +368,131 @@ bool LcdDisplay::Lock(int timeout_ms) {
 
 void LcdDisplay::Unlock() {
     lvgl_port_unlock();
+}
+
+void LcdDisplay::CreateDebugEntry() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (debug_button_ != nullptr) {
+        return;
+    }
+
+    auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+    auto icon_font = lvgl_theme->icon_font()->font();
+    auto text_font = lvgl_theme->text_font()->font();
+    auto screen = lv_screen_active();
+
+    debug_button_ = lv_button_create(screen);
+    lv_obj_set_size(debug_button_, 42, 42);
+    lv_obj_align(debug_button_, LV_ALIGN_RIGHT_MID, -18, 56);
+    lv_obj_set_style_radius(debug_button_, 21, 0);
+    lv_obj_set_style_bg_color(debug_button_, lv_color_hex(0x2F6FED), 0);
+    lv_obj_set_style_bg_opa(debug_button_, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(debug_button_, 0, 0);
+    lv_obj_set_style_pad_all(debug_button_, 0, 0);
+    lv_obj_set_scrollbar_mode(debug_button_, LV_SCROLLBAR_MODE_OFF);
+
+    auto icon = lv_label_create(debug_button_);
+    lv_label_set_text(icon, FONT_AWESOME_GEAR);
+    lv_obj_set_style_text_font(icon, icon_font, 0);
+    lv_obj_set_style_text_color(icon, lv_color_white(), 0);
+    lv_obj_center(icon);
+
+    debug_menu_ = lv_obj_create(screen);
+    lv_obj_set_size(debug_menu_, 180, LV_SIZE_CONTENT);
+    lv_obj_align(debug_menu_, LV_ALIGN_RIGHT_MID, -64, -22);
+    lv_obj_set_style_radius(debug_menu_, 8, 0);
+    lv_obj_set_style_bg_color(debug_menu_, lvgl_theme->background_color(), 0);
+    lv_obj_set_style_bg_opa(debug_menu_, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(debug_menu_, 1, 0);
+    lv_obj_set_style_border_color(debug_menu_, lvgl_theme->border_color(), 0);
+    lv_obj_set_style_pad_all(debug_menu_, lvgl_theme->spacing(2), 0);
+    lv_obj_set_style_pad_row(debug_menu_, lvgl_theme->spacing(1), 0);
+    lv_obj_set_flex_flow(debug_menu_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scrollbar_mode(debug_menu_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_add_flag(debug_menu_, LV_OBJ_FLAG_HIDDEN);
+
+    auto create_action = [this, text_font, icon_font, lvgl_theme](const char* icon_text,
+                                                                  const char* label_text,
+                                                                  DebugMenuAction action) {
+        auto button = lv_button_create(debug_menu_);
+        lv_obj_set_width(button, LV_PCT(100));
+        lv_obj_set_height(button, 38);
+        lv_obj_set_style_radius(button, 6, 0);
+        lv_obj_set_style_bg_color(button, lvgl_theme->chat_background_color(), 0);
+        lv_obj_set_style_bg_opa(button, LV_OPA_70, 0);
+        lv_obj_set_style_border_width(button, 0, 0);
+        lv_obj_set_style_pad_left(button, lvgl_theme->spacing(3), 0);
+        lv_obj_set_style_pad_right(button, lvgl_theme->spacing(3), 0);
+        lv_obj_set_flex_flow(button, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(button, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+
+        auto icon_label = lv_label_create(button);
+        lv_label_set_text(icon_label, icon_text);
+        lv_obj_set_style_text_font(icon_label, icon_font, 0);
+        lv_obj_set_style_text_color(icon_label, lvgl_theme->text_color(), 0);
+
+        auto text_label = lv_label_create(button);
+        lv_label_set_text(text_label, label_text);
+        lv_obj_set_style_text_font(text_label, text_font, 0);
+        lv_obj_set_style_text_color(text_label, lvgl_theme->text_color(), 0);
+        lv_obj_set_style_margin_left(text_label, lvgl_theme->spacing(2), 0);
+
+        lv_obj_add_event_cb(button, [](lv_event_t* e) {
+            auto action = static_cast<DebugMenuAction>(
+                reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
+            switch (action) {
+                case DebugMenuAction::kTogglePractice:
+                    Application::GetInstance().ToggleChatState();
+                    break;
+                case DebugMenuAction::kShowInfo:
+                    Application::GetInstance().ShowDebugInfo();
+                    break;
+                case DebugMenuAction::kClearMessages:
+                    Application::GetInstance().ClearDebugMessages();
+                    break;
+            }
+            auto target = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+            auto display = static_cast<LcdDisplay*>(lv_obj_get_user_data(target));
+            if (display != nullptr) {
+                display->HideDebugMenu();
+            }
+        }, LV_EVENT_CLICKED, reinterpret_cast<void*>(static_cast<intptr_t>(action)));
+        lv_obj_set_user_data(button, this);
+    };
+
+    create_action(FONT_AWESOME_MICROPHONE, "开始/提交练习", DebugMenuAction::kTogglePractice);
+    create_action(FONT_AWESOME_CIRCLE_INFO, "设备信息", DebugMenuAction::kShowInfo);
+    create_action(FONT_AWESOME_TRASH, "清空消息", DebugMenuAction::kClearMessages);
+
+    lv_obj_add_event_cb(debug_button_, [](lv_event_t* e) {
+        auto display = static_cast<LcdDisplay*>(lv_event_get_user_data(e));
+        display->ToggleDebugMenu();
+    }, LV_EVENT_CLICKED, this);
+#endif
+}
+
+void LcdDisplay::ToggleDebugMenu() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (debug_menu_ == nullptr) {
+        return;
+    }
+    if (lv_obj_has_flag(debug_menu_, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_remove_flag(debug_menu_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(debug_menu_);
+        lv_obj_move_foreground(debug_button_);
+    } else {
+        lv_obj_add_flag(debug_menu_, LV_OBJ_FLAG_HIDDEN);
+    }
+#endif
+}
+
+void LcdDisplay::HideDebugMenu() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (debug_menu_ != nullptr) {
+        lv_obj_add_flag(debug_menu_, LV_OBJ_FLAG_HIDDEN);
+    }
+#endif
 }
 
 #if CONFIG_USE_WECHAT_MESSAGE_STYLE
@@ -509,6 +650,8 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_text_font(emoji_label_, large_icon_font, 0);
     lv_obj_set_style_text_color(emoji_label_, lvgl_theme->text_color(), 0);
     lv_label_set_text(emoji_label_, FONT_AWESOME_MICROCHIP_AI);
+
+    CreateDebugEntry();
 }
 #if CONFIG_IDF_TARGET_ESP32P4
 #define  MAX_MESSAGES 40
@@ -1015,6 +1158,8 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_text_color(low_battery_label_, lv_color_white(), 0);
     lv_obj_center(low_battery_label_);
     lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
+
+    CreateDebugEntry();
 }
 
 void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {

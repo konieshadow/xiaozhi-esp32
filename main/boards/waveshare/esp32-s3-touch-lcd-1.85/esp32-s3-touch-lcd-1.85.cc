@@ -13,6 +13,8 @@
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_st77916.h>
+#include <esp_lcd_touch_cst816s.h>
+#include <esp_lvgl_port.h>
 #include <esp_timer.h>
 #include <esp_adc/adc_cali.h>
 #include <esp_adc/adc_cali_scheme.h>
@@ -274,6 +276,62 @@ private:
         ESP_ERROR_CHECK(spi_bus_initialize(QSPI_LCD_HOST, &bus_config, SPI_DMA_CH_AUTO));
     }
 
+    void InitializeTouch() {
+        ESP_LOGI(TAG, "Initialize touch I2C bus");
+        i2c_master_bus_handle_t touch_i2c_bus = nullptr;
+        i2c_master_bus_config_t touch_i2c_bus_cfg = {
+            .i2c_port = TP_PORT,
+            .sda_io_num = TP_PIN_NUM_SDA,
+            .scl_io_num = TP_PIN_NUM_SCL,
+            .clk_source = I2C_CLK_SRC_DEFAULT,
+            .glitch_ignore_cnt = 7,
+            .intr_priority = 0,
+            .trans_queue_depth = 0,
+            .flags = {
+                .enable_internal_pullup = 1,
+            },
+        };
+        ESP_ERROR_CHECK(i2c_new_master_bus(&touch_i2c_bus_cfg, &touch_i2c_bus));
+
+        esp_lcd_panel_io_handle_t touch_io_handle = nullptr;
+        esp_lcd_panel_io_i2c_config_t touch_io_config = {};
+        touch_io_config.dev_addr = ESP_LCD_TOUCH_IO_I2C_CST816S_ADDRESS;
+        touch_io_config.control_phase_bytes = 1;
+        touch_io_config.lcd_cmd_bits = 8;
+        touch_io_config.lcd_param_bits = 0;
+        touch_io_config.flags.disable_control_phase = 1;
+        touch_io_config.scl_speed_hz = 100000;
+        ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(touch_i2c_bus, &touch_io_config,
+                                                 &touch_io_handle));
+
+        esp_lcd_touch_handle_t touch_handle = nullptr;
+        esp_lcd_touch_config_t touch_config = {
+            .x_max = DISPLAY_WIDTH - 1,
+            .y_max = DISPLAY_HEIGHT - 1,
+            .rst_gpio_num = TP_PIN_NUM_RST,
+            .int_gpio_num = TP_PIN_NUM_INT,
+            .levels = {
+                .reset = 0,
+                .interrupt = 0,
+            },
+            .flags = {
+                .swap_xy = 0,
+                .mirror_x = 0,
+                .mirror_y = 0,
+            },
+        };
+        ESP_LOGI(TAG, "Initialize touch controller CST816");
+        ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_cst816s(touch_io_handle, &touch_config,
+                                                      &touch_handle));
+
+        const lvgl_port_touch_cfg_t touch_cfg = {
+            .disp = lv_display_get_default(),
+            .handle = touch_handle,
+        };
+        lvgl_port_add_touch(&touch_cfg);
+        ESP_LOGI(TAG, "Touch panel initialized successfully");
+    }
+
     void Initializest77916Display() {
 
         esp_lcd_panel_io_handle_t panel_io = nullptr;
@@ -483,6 +541,7 @@ public:
         InitializeTca9554();
         InitializeSpi();
         Initializest77916Display();
+        InitializeTouch();
         InitializeBatteryAdc();
         InitializeButtons();
         GetBacklight()->RestoreBrightness();
