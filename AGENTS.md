@@ -69,3 +69,12 @@ Recent history uses concise subjects, often conventional prefixes such as `feat(
 Follow `/Users/konie/.codex/RTK.md`: prefix shell commands with `rtk` when working in this repository.
 
 Use `rtk proxy` for commands that `rtk` cannot parse directly, such as complex `find` predicates or shell snippets. Keep firmware edits narrowly scoped, especially in shared display and board abstractions. Avoid broad `clang-format` runs over large existing files; format only the lines or files you intentionally changed.
+
+## Related Service Project
+
+The children's English speaking practice service is maintained outside this firmware repository at `/Users/konie/Codes/github/xiaozhi-server` (`../xiaozhi-server` from this repository root). Do not add service-side source code to this ESP32 firmware repo unless explicitly requested.
+
+When implementing firmware-to-service integration, read the service documentation first:
+
+- Integration guide: `/Users/konie/Codes/github/xiaozhi-server/docs/integration.md`
+- Protocol reference: `/Users/konie/Codes/github/xiaozhi-server/docs/protocol.md`

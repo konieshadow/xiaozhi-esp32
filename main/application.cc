@@ -5,6 +5,7 @@
 #include "audio_codec.h"
 #include "mqtt_protocol.h"
 #include "websocket_protocol.h"
+#include "kids_english_protocol.h"
 #include "assets/lang_config.h"
 #include "mcp_server.h"
 #include "assets.h"
@@ -477,6 +478,10 @@ void Application::InitializeProtocol() {
 
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
 
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    ESP_LOGI(TAG, "Using Kids English HTTP practice protocol");
+    protocol_ = std::make_unique<KidsEnglishProtocol>();
+#else
     if (ota_->HasMqttConfig()) {
         protocol_ = std::make_unique<MqttProtocol>();
     } else if (ota_->HasWebsocketConfig()) {
@@ -485,6 +490,7 @@ void Application::InitializeProtocol() {
         ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
         protocol_ = std::make_unique<MqttProtocol>();
     }
+#endif
 
     protocol_->OnConnected([this]() {
         DismissAlert();
@@ -706,7 +712,12 @@ void Application::HandleToggleChatEvent() {
     } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
     } else if (state == kDeviceStateListening) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+        SubmitKidsEnglishRecording();
+        SetDeviceState(kDeviceStateIdle);
+#else
         protocol_->CloseAudioChannel();
+#endif
     }
 }
 
@@ -771,7 +782,11 @@ void Application::HandleStopListeningEvent() {
         return;
     } else if (state == kDeviceStateListening) {
         if (protocol_) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+            SubmitKidsEnglishRecording();
+#else
             protocol_->SendStopListening();
+#endif
         }
         SetDeviceState(kDeviceStateIdle);
     }
@@ -857,6 +872,21 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
 #endif
 }
 
+void Application::SubmitKidsEnglishRecording() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    audio_service_.EnableVoiceProcessing(false);
+    vTaskDelay(pdMS_TO_TICKS(OPUS_FRAME_DURATION_MS * 2));
+    while (auto packet = audio_service_.PopPacketFromSendQueue()) {
+        if (protocol_ && !protocol_->SendAudio(std::move(packet))) {
+            break;
+        }
+    }
+    if (protocol_) {
+        protocol_->SendStopListening();
+    }
+#endif
+}
+
 void Application::HandleStateChangedEvent() {
     DeviceState new_state = state_machine_.GetState();
     clock_ticks_ = 0;
@@ -893,6 +923,7 @@ void Application::HandleStateChangedEvent() {
                 }
                 
                 // Send the start listening command
+                while (audio_service_.PopPacketFromSendQueue());
                 protocol_->SendStartListening(listening_mode_);
                 audio_service_.EnableVoiceProcessing(true);
             }
@@ -953,7 +984,11 @@ void Application::SetListeningMode(ListeningMode mode) {
 }
 
 ListeningMode Application::GetDefaultListeningMode() const {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    return kListeningModeManualStop;
+#else
     return aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime;
+#endif
 }
 
 void Application::Reboot() {
@@ -1128,4 +1163,3 @@ void Application::ResetProtocol() {
         protocol_.reset();
     });
 }
-

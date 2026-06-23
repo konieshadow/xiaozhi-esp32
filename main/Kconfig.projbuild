@@ -849,6 +849,22 @@ config USE_AUDIO_DEBUGGER
     help
         Enable audio debugger, send audio data through UDP to the host machine
 
+config USE_KIDS_ENGLISH_SERVER
+    bool "Use Kids English Practice HTTP Server"
+    default n
+    help
+        Use the local children's English speaking practice service instead of the
+        OTA-provisioned MQTT/WebSocket conversation server. This debug protocol
+        calls /health, /api/sessions/start, and /api/practice/audio.
+
+config KIDS_ENGLISH_SERVER_URL
+    string "Kids English Practice Server URL"
+    default "http://192.168.2.152:3000"
+    depends on USE_KIDS_ENGLISH_SERVER
+    help
+        Base URL for the kids English service. Use the host computer LAN IP,
+        not localhost, for example http://192.168.2.152:3000.
+
 menu "WiFi Configuration Method"
     help
         WiFi Configuration Method Selection

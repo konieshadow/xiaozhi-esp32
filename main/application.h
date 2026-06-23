@@ -159,6 +159,7 @@ private:
     void HandleWakeWordDetectedEvent();
     void ContinueOpenAudioChannel(ListeningMode mode);
     void ContinueWakeWordInvoke(const std::string& wake_word);
+    void SubmitKidsEnglishRecording();
 
     // Activation task (runs in background)
     void ActivationTask();
