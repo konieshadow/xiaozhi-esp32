@@ -17,6 +17,7 @@
 #include <driver/gpio.h>
 #include <arpa/inet.h>
 #include <font_awesome.h>
+#include <utility>
 
 #define TAG "Application"
 
@@ -876,12 +877,18 @@ void Application::SubmitKidsEnglishRecording() {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
     audio_service_.EnableVoiceProcessing(false);
     vTaskDelay(pdMS_TO_TICKS(OPUS_FRAME_DURATION_MS * 2));
-    while (auto packet = audio_service_.PopPacketFromSendQueue()) {
-        if (protocol_ && !protocol_->SendAudio(std::move(packet))) {
-            break;
-        }
+    auto pcm = audio_service_.EndPcmCapture();
+    while (audio_service_.PopPacketFromSendQueue()) {
     }
-    if (protocol_) {
+    if (protocol_ && !pcm.empty()) {
+        auto kids_protocol = static_cast<KidsEnglishProtocol*>(protocol_.get());
+        if (!kids_protocol->SendPcmAudio(std::move(pcm))) {
+            ESP_LOGW(TAG, "Failed to submit Kids English PCM recording");
+        } else {
+            protocol_->SendStopListening();
+        }
+    } else if (protocol_) {
+        ESP_LOGW(TAG, "No Kids English PCM recording captured");
         protocol_->SendStopListening();
     }
 #endif
@@ -925,6 +932,9 @@ void Application::HandleStateChangedEvent() {
                 // Send the start listening command
                 while (audio_service_.PopPacketFromSendQueue());
                 protocol_->SendStartListening(listening_mode_);
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+                audio_service_.BeginPcmCapture();
+#endif
                 audio_service_.EnableVoiceProcessing(true);
             }
 
@@ -950,7 +960,9 @@ void Application::HandleStateChangedEvent() {
                 // Only AFE wake word can be detected in speaking mode
                 audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
             }
+#if !CONFIG_USE_KIDS_ENGLISH_SERVER
             audio_service_.ResetDecoder();
+#endif
             break;
         case kDeviceStateWifiConfiguring:
             audio_service_.EnableVoiceProcessing(false);

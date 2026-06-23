@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <cstdint>
 #include <vector>
 
 class Http;
@@ -20,6 +21,7 @@ public:
     void CloseAudioChannel(bool send_goodbye = true) override;
     bool IsAudioChannelOpened() const override;
     bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) override;
+    bool SendPcmAudio(std::vector<int16_t>&& pcm);
     void SendStartListening(ListeningMode mode) override;
     void SendStopListening() override;
 
@@ -36,6 +38,7 @@ private:
         std::string next_prompt_text;
         std::string tts_text;
         std::string tts_audio_url;
+        std::string request_id;
     };
 
     std::string base_url_;
@@ -45,6 +48,7 @@ private:
     bool channel_opened_ = false;
     bool upload_in_progress_ = false;
     std::vector<std::unique_ptr<AudioStreamPacket>> pending_audio_;
+    std::vector<int16_t> pending_pcm_;
     mutable std::mutex mutex_;
 
     std::string BuildUrl(const char* path) const;
@@ -53,12 +57,15 @@ private:
     bool CheckHealth();
     bool StartSession();
     bool UploadPendingAudio();
+    bool DownloadAndPlayTtsAudio(const std::string& url);
     bool ParseStartSessionResponse(const cJSON* root);
     bool ParsePracticeResult(const cJSON* root, PracticeResult& result);
+    std::string CreateWavFile(const std::vector<int16_t>& pcm, int sample_rate) const;
+    bool ParseWavPcm16Mono(const std::string& wav, std::vector<int16_t>& pcm, int& sample_rate) const;
+    bool ReadHttpBody(Http* http, std::string& body);
     bool WriteMultipartField(Http* http, const std::string& boundary, const std::string& name,
                              const std::string& value);
-    bool WriteMultipartAudio(Http* http, const std::string& boundary,
-                             const std::vector<std::unique_ptr<AudioStreamPacket>>& packets);
+    bool WriteMultipartAudio(Http* http, const std::string& boundary, const std::string& wav);
     bool WriteString(Http* http, const std::string& data);
     bool FinishChunkedBody(Http* http);
     void EmitPromptMessage();

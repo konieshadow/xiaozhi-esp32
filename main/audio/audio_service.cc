@@ -99,6 +99,12 @@ void AudioService::Initialize(AudioCodec* codec) {
 #endif
 
     audio_processor_->OnOutput([this](std::vector<int16_t>&& data) {
+        {
+            std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+            if (pcm_capture_enabled_) {
+                pcm_capture_buffer_.insert(pcm_capture_buffer_.end(), data.begin(), data.end());
+            }
+        }
         PushTaskToEncodeQueue(kAudioTaskTypeEncodeToSendQueue, std::move(data));
     });
 
@@ -526,6 +532,55 @@ std::unique_ptr<AudioStreamPacket> AudioService::PopPacketFromSendQueue() {
     audio_send_queue_.pop_front();
     audio_queue_cv_.notify_all();
     return packet;
+}
+
+void AudioService::BeginPcmCapture() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    pcm_capture_buffer_.clear();
+    pcm_capture_enabled_ = true;
+}
+
+std::vector<int16_t> AudioService::EndPcmCapture() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    pcm_capture_enabled_ = false;
+    std::vector<int16_t> pcm;
+    pcm.swap(pcm_capture_buffer_);
+    return pcm;
+}
+
+void AudioService::PushPcmToPlaybackQueue(std::vector<int16_t>&& pcm, int sample_rate) {
+    if (pcm.empty()) {
+        return;
+    }
+
+    auto codec = Board::GetInstance().GetAudioCodec();
+    if (sample_rate != codec->output_sample_rate()) {
+        esp_ae_rate_cvt_handle_t resampler = nullptr;
+        esp_ae_rate_cvt_cfg_t cfg = RATE_CVT_CFG(sample_rate, codec->output_sample_rate(), ESP_AUDIO_MONO);
+        auto ret = esp_ae_rate_cvt_open(&cfg, &resampler);
+        if (resampler == nullptr) {
+            ESP_LOGE(TAG, "Failed to create PCM playback resampler, error code: %d", ret);
+            return;
+        }
+
+        uint32_t target_size = 0;
+        esp_ae_rate_cvt_get_max_out_sample_num(resampler, pcm.size(), &target_size);
+        std::vector<int16_t> resampled(target_size);
+        uint32_t actual_output = target_size;
+        esp_ae_rate_cvt_process(resampler, (esp_ae_sample_t)pcm.data(), pcm.size(),
+                                (esp_ae_sample_t)resampled.data(), &actual_output);
+        esp_ae_rate_cvt_close(resampler);
+        resampled.resize(actual_output);
+        pcm = std::move(resampled);
+    }
+
+    auto task = std::make_unique<AudioTask>();
+    task->type = kAudioTaskTypeDecodeToPlaybackQueue;
+    task->pcm = std::move(pcm);
+
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    audio_playback_queue_.push_back(std::move(task));
+    audio_queue_cv_.notify_all();
 }
 
 void AudioService::EncodeWakeWord() {

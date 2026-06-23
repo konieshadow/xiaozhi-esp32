@@ -1,5 +1,6 @@
 #include "kids_english_protocol.h"
 
+#include "application.h"
 #include "assets/lang_config.h"
 #include "audio_service.h"
 #include "board.h"
@@ -7,6 +8,9 @@
 #include <cJSON.h>
 #include <esp_log.h>
 #include <http.h>
+
+#include <algorithm>
+#include <cstring>
 
 #define TAG "KidsEnglish"
 
@@ -18,16 +22,42 @@ namespace {
 constexpr int kHealthTimeoutMs = 3000;
 constexpr int kStartSessionTimeoutMs = 5000;
 constexpr int kUploadTimeoutMs = 20000;
+constexpr int kTtsDownloadTimeoutMs = 10000;
 constexpr char kMultipartBoundary[] = "----xiaozhi-kids-english-boundary";
+constexpr int kPracticeAudioSampleRate = 16000;
 
 std::string JsonString(const cJSON* item) {
     return cJSON_IsString(item) ? item->valuestring : "";
+}
+
+void AppendLe16(std::string& out, uint16_t value) {
+    out.push_back(static_cast<char>(value & 0xff));
+    out.push_back(static_cast<char>((value >> 8) & 0xff));
+}
+
+void AppendLe32(std::string& out, uint32_t value) {
+    out.push_back(static_cast<char>(value & 0xff));
+    out.push_back(static_cast<char>((value >> 8) & 0xff));
+    out.push_back(static_cast<char>((value >> 16) & 0xff));
+    out.push_back(static_cast<char>((value >> 24) & 0xff));
+}
+
+uint16_t ReadLe16(const char* data) {
+    return static_cast<uint16_t>(static_cast<uint8_t>(data[0])) |
+           (static_cast<uint16_t>(static_cast<uint8_t>(data[1])) << 8);
+}
+
+uint32_t ReadLe32(const char* data) {
+    return static_cast<uint32_t>(static_cast<uint8_t>(data[0])) |
+           (static_cast<uint32_t>(static_cast<uint8_t>(data[1])) << 8) |
+           (static_cast<uint32_t>(static_cast<uint8_t>(data[2])) << 16) |
+           (static_cast<uint32_t>(static_cast<uint8_t>(data[3])) << 24);
 }
 }  // namespace
 
 KidsEnglishProtocol::KidsEnglishProtocol()
     : base_url_(TrimTrailingSlash(CONFIG_KIDS_ENGLISH_SERVER_URL)) {
-    server_sample_rate_ = 16000;
+    server_sample_rate_ = kPracticeAudioSampleRate;
     server_frame_duration_ = OPUS_FRAME_DURATION_MS;
 }
 
@@ -114,25 +144,38 @@ bool KidsEnglishProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     return true;
 }
 
+bool KidsEnglishProtocol::SendPcmAudio(std::vector<int16_t>&& pcm) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!channel_opened_ || upload_in_progress_) {
+        return false;
+    }
+    pending_pcm_ = std::move(pcm);
+    return true;
+}
+
 void KidsEnglishProtocol::SendStartListening(ListeningMode mode) {
     (void)mode;
     std::lock_guard<std::mutex> lock(mutex_);
     pending_audio_.clear();
+    pending_pcm_.clear();
 }
 
 void KidsEnglishProtocol::SendStopListening() {
     std::vector<std::unique_ptr<AudioStreamPacket>> audio_to_upload;
+    std::vector<int16_t> pcm_to_upload;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!channel_opened_ || upload_in_progress_) {
             return;
         }
         audio_to_upload = std::move(pending_audio_);
+        pcm_to_upload = std::move(pending_pcm_);
         pending_audio_.clear();
+        pending_pcm_.clear();
         upload_in_progress_ = true;
     }
 
-    if (audio_to_upload.empty()) {
+    if (audio_to_upload.empty() && pcm_to_upload.empty()) {
         std::lock_guard<std::mutex> lock(mutex_);
         upload_in_progress_ = false;
         ESP_LOGW(TAG, "No audio captured for current prompt");
@@ -142,6 +185,7 @@ void KidsEnglishProtocol::SendStopListening() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         pending_audio_ = std::move(audio_to_upload);
+        pending_pcm_ = std::move(pcm_to_upload);
     }
 
     bool ok = UploadPendingAudio();
@@ -149,6 +193,7 @@ void KidsEnglishProtocol::SendStopListening() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         pending_audio_.clear();
+        pending_pcm_.clear();
         upload_in_progress_ = false;
     }
 
@@ -253,18 +298,23 @@ bool KidsEnglishProtocol::StartSession() {
 }
 
 bool KidsEnglishProtocol::UploadPendingAudio() {
-    std::vector<std::unique_ptr<AudioStreamPacket>> packets;
+    std::vector<int16_t> pcm;
     std::string session_id;
     std::string prompt_id;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         session_id = session_id_;
         prompt_id = prompt_id_;
-        packets = std::move(pending_audio_);
+        pending_audio_.clear();
+        pcm = std::move(pending_pcm_);
     }
 
     if (session_id.empty() || prompt_id.empty()) {
         ESP_LOGE(TAG, "Missing session or prompt id");
+        return false;
+    }
+    if (pcm.empty()) {
+        ESP_LOGE(TAG, "No PCM audio captured; WAV upload requires 16 kHz mono PCM");
         return false;
     }
 
@@ -279,8 +329,10 @@ bool KidsEnglishProtocol::UploadPendingAudio() {
     http->SetHeader("Accept", "application/json");
     http->SetHeader("Content-Type", std::string("multipart/form-data; boundary=") + kMultipartBoundary);
 
+    std::string wav = CreateWavFile(pcm, kPracticeAudioSampleRate);
     auto url = BuildUrl("/api/practice/audio");
-    ESP_LOGI(TAG, "Uploading %u Opus packets to %s", (unsigned)packets.size(), url.c_str());
+    ESP_LOGI(TAG, "Uploading %u PCM samples (%u bytes WAV) to %s", (unsigned)pcm.size(),
+             (unsigned)wav.size(), url.c_str());
     if (!http->Open("POST", url)) {
         ESP_LOGE(TAG, "HTTP upload open failed, error=%d", http->GetLastError());
         return false;
@@ -288,7 +340,9 @@ bool KidsEnglishProtocol::UploadPendingAudio() {
 
     bool write_ok = WriteMultipartField(http.get(), kMultipartBoundary, "sessionId", session_id) &&
                     WriteMultipartField(http.get(), kMultipartBoundary, "promptId", prompt_id) &&
-                    WriteMultipartAudio(http.get(), kMultipartBoundary, packets) &&
+                    WriteMultipartField(http.get(), kMultipartBoundary, "deviceId",
+                                        Board::GetInstance().GetUuid()) &&
+                    WriteMultipartAudio(http.get(), kMultipartBoundary, wav) &&
                     WriteString(http.get(), std::string("--") + kMultipartBoundary + "--\r\n") &&
                     FinishChunkedBody(http.get());
     if (!write_ok) {
@@ -361,6 +415,8 @@ bool KidsEnglishProtocol::ParsePracticeResult(const cJSON* root, PracticeResult&
     auto next_prompt_text = cJSON_GetObjectItem(next_prompt, "text");
     auto tts_text = cJSON_GetObjectItem(data, "ttsText");
     auto tts_audio_url = cJSON_GetObjectItem(data, "ttsAudioUrl");
+    auto diagnostics = cJSON_GetObjectItem(data, "diagnostics");
+    auto request_id = cJSON_GetObjectItem(diagnostics, "requestId");
 
     if (!cJSON_IsString(recognized_text) || !cJSON_IsNumber(score) || !cJSON_IsString(feedback) ||
         !cJSON_IsString(next_prompt_id) || !cJSON_IsString(next_prompt_text)) {
@@ -376,6 +432,149 @@ bool KidsEnglishProtocol::ParsePracticeResult(const cJSON* root, PracticeResult&
     result.next_prompt_text = next_prompt_text->valuestring;
     result.tts_text = JsonString(tts_text);
     result.tts_audio_url = JsonString(tts_audio_url);
+    result.request_id = JsonString(request_id);
+    return true;
+}
+
+std::string KidsEnglishProtocol::CreateWavFile(const std::vector<int16_t>& pcm, int sample_rate) const {
+    std::string wav;
+    uint32_t data_size = pcm.size() * sizeof(int16_t);
+    wav.reserve(44 + data_size);
+    wav.append("RIFF", 4);
+    AppendLe32(wav, 36 + data_size);
+    wav.append("WAVE", 4);
+    wav.append("fmt ", 4);
+    AppendLe32(wav, 16);
+    AppendLe16(wav, 1);
+    AppendLe16(wav, 1);
+    AppendLe32(wav, sample_rate);
+    AppendLe32(wav, sample_rate * sizeof(int16_t));
+    AppendLe16(wav, sizeof(int16_t));
+    AppendLe16(wav, 16);
+    wav.append("data", 4);
+    AppendLe32(wav, data_size);
+    wav.append(reinterpret_cast<const char*>(pcm.data()), data_size);
+    return wav;
+}
+
+bool KidsEnglishProtocol::ParseWavPcm16Mono(const std::string& wav, std::vector<int16_t>& pcm,
+                                            int& sample_rate) const {
+    if (wav.size() < 44 || std::memcmp(wav.data(), "RIFF", 4) != 0 ||
+        std::memcmp(wav.data() + 8, "WAVE", 4) != 0) {
+        ESP_LOGE(TAG, "Invalid WAV header");
+        return false;
+    }
+
+    size_t offset = 12;
+    bool found_fmt = false;
+    bool found_data = false;
+    uint16_t audio_format = 0;
+    uint16_t channels = 0;
+    uint16_t bits_per_sample = 0;
+    uint32_t data_offset = 0;
+    uint32_t data_size = 0;
+    sample_rate = 0;
+
+    while (offset + 8 <= wav.size()) {
+        const char* chunk = wav.data() + offset;
+        uint32_t chunk_size = ReadLe32(chunk + 4);
+        offset += 8;
+        if (offset + chunk_size > wav.size()) {
+            ESP_LOGE(TAG, "Truncated WAV chunk");
+            return false;
+        }
+
+        if (std::memcmp(chunk, "fmt ", 4) == 0 && chunk_size >= 16) {
+            audio_format = ReadLe16(wav.data() + offset);
+            channels = ReadLe16(wav.data() + offset + 2);
+            sample_rate = ReadLe32(wav.data() + offset + 4);
+            bits_per_sample = ReadLe16(wav.data() + offset + 14);
+            found_fmt = true;
+        } else if (std::memcmp(chunk, "data", 4) == 0) {
+            data_offset = offset;
+            data_size = chunk_size;
+            found_data = true;
+        }
+
+        offset += chunk_size + (chunk_size & 1);
+    }
+
+    if (!found_fmt || !found_data || audio_format != 1 || channels != 1 || bits_per_sample != 16 ||
+        sample_rate <= 0 || (data_size % sizeof(int16_t)) != 0) {
+        ESP_LOGE(TAG, "Unsupported WAV format: format=%u channels=%u sample_rate=%d bits=%u",
+                 audio_format, channels, sample_rate, bits_per_sample);
+        return false;
+    }
+
+    pcm.resize(data_size / sizeof(int16_t));
+    std::memcpy(pcm.data(), wav.data() + data_offset, data_size);
+    return true;
+}
+
+bool KidsEnglishProtocol::DownloadAndPlayTtsAudio(const std::string& url) {
+    auto network = Board::GetInstance().GetNetwork();
+    auto http = network->CreateHttp(3);
+    if (http == nullptr) {
+        ESP_LOGE(TAG, "Failed to create HTTP client for TTS download");
+        return false;
+    }
+
+    http->SetTimeout(kTtsDownloadTimeoutMs);
+    http->SetHeader("Accept", "audio/wav,*/*");
+    ESP_LOGI(TAG, "Downloading TTS audio: %s", url.c_str());
+    if (!http->Open("GET", url)) {
+        ESP_LOGE(TAG, "TTS download open failed, error=%d", http->GetLastError());
+        return false;
+    }
+
+    int status = http->GetStatusCode();
+    std::string content_type = http->GetResponseHeader("Content-Type");
+    std::string body;
+    bool read_ok = ReadHttpBody(http.get(), body);
+    http->Close();
+    if (status < 200 || status >= 300) {
+        ESP_LOGE(TAG, "TTS download failed, status=%d, bytes=%u", status, (unsigned)body.size());
+        return false;
+    }
+    if (!read_ok) {
+        ESP_LOGE(TAG, "Failed to read TTS audio body");
+        return false;
+    }
+
+    std::vector<int16_t> pcm;
+    int sample_rate = 0;
+    if (!ParseWavPcm16Mono(body, pcm, sample_rate)) {
+        ESP_LOGE(TAG, "TTS response is not playable WAV, content_type=%s", content_type.c_str());
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Downloaded TTS WAV: content_type=%s sample_rate=%d samples=%u",
+             content_type.c_str(), sample_rate, (unsigned)pcm.size());
+    AudioService& audio_service = Application::GetInstance().GetAudioService();
+    audio_service.PushPcmToPlaybackQueue(std::move(pcm), sample_rate);
+    return true;
+}
+
+bool KidsEnglishProtocol::ReadHttpBody(Http* http, std::string& body) {
+    body.clear();
+    size_t content_length = http->GetBodyLength();
+    if (content_length == 0) {
+        body = http->ReadAll();
+        return !body.empty();
+    }
+
+    body.resize(content_length);
+    size_t total_read = 0;
+    while (total_read < content_length) {
+        int read = http->Read(body.data() + total_read, content_length - total_read);
+        if (read <= 0) {
+            ESP_LOGE(TAG, "HTTP body read failed at %u/%u bytes", (unsigned)total_read,
+                     (unsigned)content_length);
+            body.resize(total_read);
+            return false;
+        }
+        total_read += read;
+    }
     return true;
 }
 
@@ -387,23 +586,16 @@ bool KidsEnglishProtocol::WriteMultipartField(Http* http, const std::string& bou
     return WriteString(http, data);
 }
 
-bool KidsEnglishProtocol::WriteMultipartAudio(
-    Http* http, const std::string& boundary,
-    const std::vector<std::unique_ptr<AudioStreamPacket>>& packets) {
+bool KidsEnglishProtocol::WriteMultipartAudio(Http* http, const std::string& boundary,
+                                              const std::string& wav) {
     std::string header = "--" + boundary + "\r\n";
-    header += "Content-Disposition: form-data; name=\"audio\"; filename=\"practice.opus\"\r\n";
-    header += "Content-Type: audio/opus\r\n\r\n";
+    header += "Content-Disposition: form-data; name=\"audio\"; filename=\"practice.wav\"\r\n";
+    header += "Content-Type: audio/wav\r\n\r\n";
     if (!WriteString(http, header)) {
         return false;
     }
-
-    for (const auto& packet : packets) {
-        if (packet == nullptr || packet->payload.empty()) {
-            continue;
-        }
-        if (http->Write(reinterpret_cast<const char*>(packet->payload.data()), packet->payload.size()) <= 0) {
-            return false;
-        }
+    if (http->Write(wav.data(), wav.size()) <= 0) {
+        return false;
     }
     return WriteString(http, "\r\n");
 }
@@ -424,6 +616,10 @@ void KidsEnglishProtocol::EmitPromptMessage() {
 void KidsEnglishProtocol::EmitPracticeResult(const PracticeResult& result) {
     EmitSttMessage(result.recognized_text);
 
+    if (!result.request_id.empty()) {
+        ESP_LOGI(TAG, "Practice requestId: %s", result.request_id.c_str());
+    }
+
     std::string message = result.feedback;
     message += " Score: " + std::to_string(result.score);
     if (!result.correction.empty()) {
@@ -435,6 +631,11 @@ void KidsEnglishProtocol::EmitPracticeResult(const PracticeResult& result) {
 
     EmitTtsMessage("start");
     EmitAssistantMessage(message);
+    if (!result.tts_audio_url.empty()) {
+        if (!DownloadAndPlayTtsAudio(result.tts_audio_url)) {
+            ESP_LOGW(TAG, "Failed to download/play TTS audio; falling back to text-only feedback");
+        }
+    }
     EmitTtsMessage("stop", result.tts_text.empty() ? message.c_str() : result.tts_text.c_str());
     EmitEmotion(result.score >= 80 ? "happy" : "thinking");
 

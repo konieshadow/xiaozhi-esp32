@@ -129,6 +129,9 @@ public:
 
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
+    void BeginPcmCapture();
+    std::vector<int16_t> EndPcmCapture();
+    void PushPcmToPlaybackQueue(std::vector<int16_t>&& pcm, int sample_rate);
     void PlaySound(const std::string_view& sound);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
@@ -171,6 +174,8 @@ private:
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_testing_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_encode_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
+    bool pcm_capture_enabled_ = false;
+    std::vector<int16_t> pcm_capture_buffer_;
     // For server AEC
     std::deque<uint32_t> timestamp_queue_;
 
