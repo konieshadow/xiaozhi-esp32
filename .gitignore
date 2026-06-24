@@ -8,6 +8,7 @@ dist/
 sdkconfig.old
 sdkconfig
 dependencies.lock
+eim_config.toml
 .env
 releases/
 main/assets/lang_config.h
