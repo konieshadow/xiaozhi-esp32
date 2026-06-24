@@ -39,6 +39,14 @@ private:
         std::string tts_text;
         std::string tts_audio_url;
         std::string request_id;
+        std::string provider;
+        std::string mode;
+        std::string audio_mime_type;
+        int asr_duration_ms = -1;
+        int tts_duration_ms = -1;
+        int total_duration_ms = -1;
+        int audio_bytes = -1;
+        double audio_duration_seconds = -1.0;
     };
 
     std::string base_url_;

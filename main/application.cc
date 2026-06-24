@@ -919,6 +919,9 @@ void Application::SubmitKidsEnglishRecording() {
     audio_service_.EnableVoiceProcessing(false);
     vTaskDelay(pdMS_TO_TICKS(OPUS_FRAME_DURATION_MS * 2));
     auto pcm = audio_service_.EndPcmCapture();
+    ESP_LOGI(TAG, "Kids English PCM capture: samples=%u bytes=%u durationMs=%u",
+             (unsigned)pcm.size(), (unsigned)(pcm.size() * sizeof(int16_t)),
+             (unsigned)(pcm.size() * 1000 / 16000));
     while (audio_service_.PopPacketFromSendQueue()) {
     }
     if (protocol_ && !pcm.empty()) {

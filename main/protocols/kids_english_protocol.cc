@@ -25,9 +25,22 @@ constexpr int kUploadTimeoutMs = 20000;
 constexpr int kTtsDownloadTimeoutMs = 10000;
 constexpr char kMultipartBoundary[] = "----xiaozhi-kids-english-boundary";
 constexpr int kPracticeAudioSampleRate = 16000;
+constexpr int kPracticeAudioChannels = 1;
+constexpr int kPracticeAudioBitsPerSample = 16;
+constexpr int kMaxPracticeAudioDurationSeconds = 10;
+constexpr size_t kMaxPracticeAudioBytes = 5 * 1024 * 1024;
+constexpr size_t kWavHeaderBytes = 44;
 
 std::string JsonString(const cJSON* item) {
     return cJSON_IsString(item) ? item->valuestring : "";
+}
+
+int JsonInt(const cJSON* item, int fallback = -1) {
+    return cJSON_IsNumber(item) ? item->valueint : fallback;
+}
+
+double JsonDouble(const cJSON* item, double fallback = -1.0) {
+    return cJSON_IsNumber(item) ? item->valuedouble : fallback;
 }
 
 void AppendLe16(std::string& out, uint16_t value) {
@@ -301,6 +314,7 @@ bool KidsEnglishProtocol::UploadPendingAudio() {
     std::vector<int16_t> pcm;
     std::string session_id;
     std::string prompt_id;
+    std::string device_id = Board::GetInstance().GetUuid();
     {
         std::lock_guard<std::mutex> lock(mutex_);
         session_id = session_id_;
@@ -318,6 +332,23 @@ bool KidsEnglishProtocol::UploadPendingAudio() {
         return false;
     }
 
+    size_t pcm_bytes = pcm.size() * sizeof(int16_t);
+    size_t wav_bytes = kWavHeaderBytes + pcm_bytes;
+    int duration_ms = static_cast<int>((pcm.size() * 1000) / kPracticeAudioSampleRate);
+    if (duration_ms > kMaxPracticeAudioDurationSeconds * 1000) {
+        ESP_LOGW(TAG, "Trimming Kids English recording from %d ms to %d seconds", duration_ms,
+                 kMaxPracticeAudioDurationSeconds);
+        pcm.resize(kPracticeAudioSampleRate * kMaxPracticeAudioDurationSeconds);
+        pcm_bytes = pcm.size() * sizeof(int16_t);
+        wav_bytes = kWavHeaderBytes + pcm_bytes;
+        duration_ms = static_cast<int>((pcm.size() * 1000) / kPracticeAudioSampleRate);
+    }
+    if (wav_bytes > kMaxPracticeAudioBytes) {
+        ESP_LOGE(TAG, "Kids English WAV too large: %u bytes > %u bytes", (unsigned)wav_bytes,
+                 (unsigned)kMaxPracticeAudioBytes);
+        return false;
+    }
+
     auto network = Board::GetInstance().GetNetwork();
     auto http = network->CreateHttp(3);
     if (http == nullptr) {
@@ -331,8 +362,12 @@ bool KidsEnglishProtocol::UploadPendingAudio() {
 
     std::string wav = CreateWavFile(pcm, kPracticeAudioSampleRate);
     auto url = BuildUrl("/api/practice/audio");
-    ESP_LOGI(TAG, "Uploading %u PCM samples (%u bytes WAV) to %s", (unsigned)pcm.size(),
-             (unsigned)wav.size(), url.c_str());
+    ESP_LOGI(TAG,
+             "Uploading Kids English audio: deviceId=%s sessionId=%s promptId=%s pcmBytes=%u "
+             "wavBytes=%u durationMs=%d format=wav/%dHz/%dch/%dbit url=%s",
+             device_id.c_str(), session_id.c_str(), prompt_id.c_str(), (unsigned)pcm_bytes,
+             (unsigned)wav.size(), duration_ms, kPracticeAudioSampleRate, kPracticeAudioChannels,
+             kPracticeAudioBitsPerSample, url.c_str());
     if (!http->Open("POST", url)) {
         ESP_LOGE(TAG, "HTTP upload open failed, error=%d", http->GetLastError());
         return false;
@@ -340,8 +375,7 @@ bool KidsEnglishProtocol::UploadPendingAudio() {
 
     bool write_ok = WriteMultipartField(http.get(), kMultipartBoundary, "sessionId", session_id) &&
                     WriteMultipartField(http.get(), kMultipartBoundary, "promptId", prompt_id) &&
-                    WriteMultipartField(http.get(), kMultipartBoundary, "deviceId",
-                                        Board::GetInstance().GetUuid()) &&
+                    WriteMultipartField(http.get(), kMultipartBoundary, "deviceId", device_id) &&
                     WriteMultipartAudio(http.get(), kMultipartBoundary, wav) &&
                     WriteString(http.get(), std::string("--") + kMultipartBoundary + "--\r\n") &&
                     FinishChunkedBody(http.get());
@@ -354,6 +388,8 @@ bool KidsEnglishProtocol::UploadPendingAudio() {
     int status = http->GetStatusCode();
     std::string response = http->ReadAll();
     http->Close();
+    ESP_LOGI(TAG, "Kids English audio upload HTTP status=%d responseBytes=%u", status,
+             (unsigned)response.size());
     if (status < 200 || status >= 300) {
         ESP_LOGE(TAG, "Upload failed, status=%d, body=%s", status, response.c_str());
         return false;
@@ -379,6 +415,13 @@ bool KidsEnglishProtocol::UploadPendingAudio() {
         return false;
     }
 
+    ESP_LOGI(TAG,
+             "Kids English ASR result: deviceId=%s sessionId=%s promptId=%s requestId=%s "
+             "recordingBytes=%u httpStatus=%d recognizedText=\"%s\" score=%d "
+             "asrDurationMs=%d audioBytes=%d audioDurationSeconds=%.2f",
+             device_id.c_str(), session_id.c_str(), prompt_id.c_str(), result.request_id.c_str(),
+             (unsigned)pcm_bytes, status, result.recognized_text.c_str(), result.score,
+             result.asr_duration_ms, result.audio_bytes, result.audio_duration_seconds);
     EmitPracticeResult(result);
     return true;
 }
@@ -417,6 +460,14 @@ bool KidsEnglishProtocol::ParsePracticeResult(const cJSON* root, PracticeResult&
     auto tts_audio_url = cJSON_GetObjectItem(data, "ttsAudioUrl");
     auto diagnostics = cJSON_GetObjectItem(data, "diagnostics");
     auto request_id = cJSON_GetObjectItem(diagnostics, "requestId");
+    auto provider = cJSON_GetObjectItem(diagnostics, "provider");
+    auto mode = cJSON_GetObjectItem(diagnostics, "mode");
+    auto asr_duration_ms = cJSON_GetObjectItem(diagnostics, "asrDurationMs");
+    auto tts_duration_ms = cJSON_GetObjectItem(diagnostics, "ttsDurationMs");
+    auto total_duration_ms = cJSON_GetObjectItem(diagnostics, "totalDurationMs");
+    auto audio_bytes = cJSON_GetObjectItem(diagnostics, "audioBytes");
+    auto audio_duration_seconds = cJSON_GetObjectItem(diagnostics, "audioDurationSeconds");
+    auto audio_mime_type = cJSON_GetObjectItem(diagnostics, "audioMimeType");
 
     if (!cJSON_IsString(recognized_text) || !cJSON_IsNumber(score) || !cJSON_IsString(feedback) ||
         !cJSON_IsString(next_prompt_id) || !cJSON_IsString(next_prompt_text)) {
@@ -433,6 +484,14 @@ bool KidsEnglishProtocol::ParsePracticeResult(const cJSON* root, PracticeResult&
     result.tts_text = JsonString(tts_text);
     result.tts_audio_url = JsonString(tts_audio_url);
     result.request_id = JsonString(request_id);
+    result.provider = JsonString(provider);
+    result.mode = JsonString(mode);
+    result.asr_duration_ms = JsonInt(asr_duration_ms);
+    result.tts_duration_ms = JsonInt(tts_duration_ms);
+    result.total_duration_ms = JsonInt(total_duration_ms);
+    result.audio_bytes = JsonInt(audio_bytes);
+    result.audio_duration_seconds = JsonDouble(audio_duration_seconds);
+    result.audio_mime_type = JsonString(audio_mime_type);
     return true;
 }
 
@@ -616,9 +675,13 @@ void KidsEnglishProtocol::EmitPromptMessage() {
 void KidsEnglishProtocol::EmitPracticeResult(const PracticeResult& result) {
     EmitSttMessage(result.recognized_text);
 
-    if (!result.request_id.empty()) {
-        ESP_LOGI(TAG, "Practice requestId: %s", result.request_id.c_str());
-    }
+    ESP_LOGI(TAG,
+             "Practice diagnostics: requestId=%s provider=%s mode=%s asrDurationMs=%d "
+             "ttsDurationMs=%d totalDurationMs=%d audioBytes=%d audioDurationSeconds=%.2f "
+             "audioMimeType=%s",
+             result.request_id.c_str(), result.provider.c_str(), result.mode.c_str(),
+             result.asr_duration_ms, result.tts_duration_ms, result.total_duration_ms,
+             result.audio_bytes, result.audio_duration_seconds, result.audio_mime_type.c_str());
 
     std::string message = result.feedback;
     message += " Score: " + std::to_string(result.score);
@@ -632,6 +695,7 @@ void KidsEnglishProtocol::EmitPracticeResult(const PracticeResult& result) {
     EmitTtsMessage("start");
     EmitAssistantMessage(message);
     if (!result.tts_audio_url.empty()) {
+        ESP_LOGI(TAG, "Practice ttsAudioUrl: %s", result.tts_audio_url.c_str());
         if (!DownloadAndPlayTtsAudio(result.tts_audio_url)) {
             ESP_LOGW(TAG, "Failed to download/play TTS audio; falling back to text-only feedback");
         }
