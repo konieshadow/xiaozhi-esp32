@@ -480,7 +480,7 @@ void Application::InitializeProtocol() {
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
 
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
-    ESP_LOGI(TAG, "Using Kids English HTTP practice protocol");
+    ESP_LOGI(TAG, "Using Kids English HTTP conversation protocol");
     protocol_ = std::make_unique<KidsEnglishProtocol>();
 #else
     if (ota_->HasMqttConfig()) {
@@ -536,13 +536,23 @@ void Application::InitializeProtocol() {
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
-                Schedule([this]() {
+                auto continue_listening = cJSON_GetObjectItem(root, "continue_listening");
+                bool should_continue_listening = cJSON_IsTrue(continue_listening);
+                Schedule([this, should_continue_listening]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+                        if (should_continue_listening) {
+                            SetDeviceState(kDeviceStateListening);
+                        } else {
+                            SetDeviceState(kDeviceStateIdle);
+                        }
+#else
                         if (listening_mode_ == kListeningModeManualStop) {
                             SetDeviceState(kDeviceStateIdle);
                         } else {
                             SetDeviceState(kDeviceStateListening);
                         }
+#endif
                     }
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
@@ -743,6 +753,9 @@ void Application::HandleToggleChatEvent() {
     if (state == kDeviceStateIdle) {
         ListeningMode mode = GetDefaultListeningMode();
         if (!protocol_->IsAudioChannelOpened()) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+            static_cast<KidsEnglishProtocol*>(protocol_.get())->SetNextConversationTrigger("manual");
+#endif
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
             Schedule([this, mode]() {
@@ -756,7 +769,6 @@ void Application::HandleToggleChatEvent() {
     } else if (state == kDeviceStateListening) {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
         SubmitKidsEnglishRecording();
-        SetDeviceState(kDeviceStateIdle);
 #else
         protocol_->CloseAudioChannel();
 #endif
@@ -801,6 +813,9 @@ void Application::HandleStartListeningEvent() {
     
     if (state == kDeviceStateIdle) {
         if (!protocol_->IsAudioChannelOpened()) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+            static_cast<KidsEnglishProtocol*>(protocol_.get())->SetNextConversationTrigger("manual");
+#endif
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
             Schedule([this]() {
@@ -828,9 +843,9 @@ void Application::HandleStopListeningEvent() {
             SubmitKidsEnglishRecording();
 #else
             protocol_->SendStopListening();
+            SetDeviceState(kDeviceStateIdle);
 #endif
         }
-        SetDeviceState(kDeviceStateIdle);
     }
 }
 
@@ -848,6 +863,9 @@ void Application::HandleWakeWordDetectedEvent() {
         auto wake_word = audio_service_.GetLastWakeWord();
 
         if (!protocol_->IsAudioChannelOpened()) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+            static_cast<KidsEnglishProtocol*>(protocol_.get())->SetNextConversationTrigger("wake_word");
+#endif
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update),
             // then continue with OpenAudioChannel which may block for ~1 second
@@ -934,6 +952,7 @@ void Application::SubmitKidsEnglishRecording() {
     } else if (protocol_) {
         ESP_LOGW(TAG, "No Kids English PCM recording captured");
         protocol_->SendStopListening();
+        SetDeviceState(kDeviceStateIdle);
     }
 #endif
 }

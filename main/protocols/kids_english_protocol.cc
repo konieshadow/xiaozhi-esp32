@@ -6,11 +6,17 @@
 #include "board.h"
 
 #include <cJSON.h>
+#include <esp_app_desc.h>
 #include <esp_log.h>
+#include <esp_random.h>
+#include <esp_timer.h>
 #include <http.h>
+#include <mbedtls/md.h>
 
 #include <algorithm>
 #include <cstring>
+#include <ctime>
+#include <sys/time.h>
 
 #define TAG "KidsEnglish"
 
@@ -18,9 +24,18 @@
 #define CONFIG_KIDS_ENGLISH_SERVER_URL ""
 #endif
 
+#ifndef CONFIG_KIDS_ENGLISH_DEVICE_ID
+#define CONFIG_KIDS_ENGLISH_DEVICE_ID "esp32-devkit-001"
+#endif
+
+#ifndef CONFIG_KIDS_ENGLISH_DEVICE_SECRET
+#define CONFIG_KIDS_ENGLISH_DEVICE_SECRET "dev-secret"
+#endif
+
 namespace {
 constexpr int kHealthTimeoutMs = 3000;
-constexpr int kStartSessionTimeoutMs = 5000;
+constexpr int kDeviceHelloTimeoutMs = 5000;
+constexpr int kStartConversationTimeoutMs = 5000;
 constexpr int kUploadTimeoutMs = 20000;
 constexpr int kTtsDownloadTimeoutMs = 10000;
 constexpr char kMultipartBoundary[] = "----xiaozhi-kids-english-boundary";
@@ -30,6 +45,7 @@ constexpr int kPracticeAudioBitsPerSample = 16;
 constexpr int kMaxPracticeAudioDurationSeconds = 10;
 constexpr size_t kMaxPracticeAudioBytes = 5 * 1024 * 1024;
 constexpr size_t kWavHeaderBytes = 44;
+constexpr int64_t kUnixTimeReasonableMs = 1600000000000LL;
 
 std::string JsonString(const cJSON* item) {
     return cJSON_IsString(item) ? item->valuestring : "";
@@ -39,8 +55,90 @@ int JsonInt(const cJSON* item, int fallback = -1) {
     return cJSON_IsNumber(item) ? item->valueint : fallback;
 }
 
-double JsonDouble(const cJSON* item, double fallback = -1.0) {
-    return cJSON_IsNumber(item) ? item->valuedouble : fallback;
+bool JsonBool(const cJSON* item, bool fallback = false) {
+    if (cJSON_IsBool(item)) {
+        return cJSON_IsTrue(item);
+    }
+    return fallback;
+}
+
+std::string JsonEscape(const std::string& text) {
+    cJSON* value = cJSON_CreateString(text.c_str());
+    char* printed = cJSON_PrintUnformatted(value);
+    std::string escaped = printed == nullptr ? "\"\"" : printed;
+    if (printed != nullptr) {
+        cJSON_free(printed);
+    }
+    cJSON_Delete(value);
+    return escaped;
+}
+
+std::string ToHex(const uint8_t* data, size_t size) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string hex;
+    hex.resize(size * 2);
+    for (size_t i = 0; i < size; ++i) {
+        hex[i * 2] = kHex[(data[i] >> 4) & 0x0f];
+        hex[i * 2 + 1] = kHex[data[i] & 0x0f];
+    }
+    return hex;
+}
+
+std::string Sha256Hex(const std::string& data) {
+    uint8_t digest[32];
+    mbedtls_md_context_t ctx;
+    mbedtls_md_init(&ctx);
+    const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (mbedtls_md_setup(&ctx, info, 0) != 0 || mbedtls_md_starts(&ctx) != 0 ||
+        mbedtls_md_update(&ctx, reinterpret_cast<const unsigned char*>(data.data()), data.size()) != 0 ||
+        mbedtls_md_finish(&ctx, digest) != 0) {
+        ESP_LOGE(TAG, "SHA256 calculation failed");
+        std::memset(digest, 0, sizeof(digest));
+    }
+    mbedtls_md_free(&ctx);
+    return ToHex(digest, sizeof(digest));
+}
+
+std::string HmacSha256Hex(const std::string& key, const std::string& data) {
+    uint8_t digest[32];
+    mbedtls_md_context_t ctx;
+    mbedtls_md_init(&ctx);
+    const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (mbedtls_md_setup(&ctx, info, 1) != 0 ||
+        mbedtls_md_hmac_starts(&ctx, reinterpret_cast<const unsigned char*>(key.data()), key.size()) != 0 ||
+        mbedtls_md_hmac_update(&ctx, reinterpret_cast<const unsigned char*>(data.data()), data.size()) != 0 ||
+        mbedtls_md_hmac_finish(&ctx, digest) != 0) {
+        ESP_LOGE(TAG, "HMAC-SHA256 calculation failed");
+        std::memset(digest, 0, sizeof(digest));
+    }
+    mbedtls_md_free(&ctx);
+    return ToHex(digest, sizeof(digest));
+}
+
+int64_t DaysFromCivil(int year, unsigned month, unsigned day) {
+    year -= month <= 2;
+    const int era = (year >= 0 ? year : year - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(year - era * 400);
+    const unsigned doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097LL + static_cast<int64_t>(doe) - 719468LL;
+}
+
+bool ParseIsoUtcMillis(const std::string& iso, int64_t& unix_ms) {
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    int millis = 0;
+    if (std::sscanf(iso.c_str(), "%4d-%2d-%2dT%2d:%2d:%2d.%3dZ", &year, &month, &day, &hour,
+                    &minute, &second, &millis) < 6) {
+        return false;
+    }
+    int64_t days = DaysFromCivil(year, static_cast<unsigned>(month), static_cast<unsigned>(day));
+    unix_ms = (((days * 24 + hour) * 60 + minute) * 60 + second) * 1000 + millis;
+    return true;
 }
 
 void AppendLe16(std::string& out, uint16_t value) {
@@ -69,7 +167,9 @@ uint32_t ReadLe32(const char* data) {
 }  // namespace
 
 KidsEnglishProtocol::KidsEnglishProtocol()
-    : base_url_(TrimTrailingSlash(CONFIG_KIDS_ENGLISH_SERVER_URL)) {
+    : base_url_(TrimTrailingSlash(CONFIG_KIDS_ENGLISH_SERVER_URL)),
+      device_id_(CONFIG_KIDS_ENGLISH_DEVICE_ID),
+      device_secret_(CONFIG_KIDS_ENGLISH_DEVICE_SECRET) {
     server_sample_rate_ = kPracticeAudioSampleRate;
     server_frame_duration_ = OPUS_FRAME_DURATION_MS;
 }
@@ -95,43 +195,51 @@ bool KidsEnglishProtocol::OpenAudioChannel() {
     if (!CheckHealth()) {
         return false;
     }
-    if (!StartSession()) {
+    if (!DeviceHello()) {
+        return false;
+    }
+    std::string trigger;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        trigger = next_conversation_trigger_;
+        next_conversation_trigger_ = "manual";
+    }
+    if (!StartConversation(trigger.c_str())) {
         return false;
     }
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
         pending_audio_.clear();
+        pending_pcm_.clear();
         channel_opened_ = true;
     }
 
     if (on_audio_channel_opened_ != nullptr) {
         on_audio_channel_opened_();
     }
-    EmitPromptMessage();
     return true;
 }
 
 void KidsEnglishProtocol::CloseAudioChannel(bool send_goodbye) {
-    std::string session_to_end;
+    std::string conversation_to_end;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!channel_opened_) {
             pending_audio_.clear();
+            pending_pcm_.clear();
             return;
         }
         channel_opened_ = false;
         pending_audio_.clear();
-        session_to_end = session_id_;
+        pending_pcm_.clear();
+        conversation_to_end = conversation_id_;
+        conversation_id_.clear();
+        session_id_.clear();
     }
 
-    if (send_goodbye && !session_to_end.empty()) {
-        std::string path = "/api/sessions/" + session_to_end + "/end";
-        cJSON* response = nullptr;
-        RequestJson("POST", path, "", &response, kStartSessionTimeoutMs);
-        if (response != nullptr) {
-            cJSON_Delete(response);
-        }
+    if (send_goodbye && !conversation_to_end.empty()) {
+        EndConversation(conversation_to_end);
     }
 
     if (on_audio_channel_closed_ != nullptr) {
@@ -164,6 +272,16 @@ bool KidsEnglishProtocol::SendPcmAudio(std::vector<int16_t>&& pcm) {
     }
     pending_pcm_ = std::move(pcm);
     return true;
+}
+
+void KidsEnglishProtocol::SetNextConversationTrigger(const std::string& trigger) {
+    if (trigger != "wake_word" && trigger != "touch" && trigger != "manual") {
+        ESP_LOGW(TAG, "Ignoring invalid conversation trigger: %s", trigger.c_str());
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    next_conversation_trigger_ = trigger;
 }
 
 void KidsEnglishProtocol::SendStartListening(ListeningMode mode) {
@@ -224,9 +342,157 @@ std::string KidsEnglishProtocol::BuildUrl(const char* path) const {
     return base_url_ + path;
 }
 
+void KidsEnglishProtocol::AddDeviceAuthHeaders(Http* http, const std::string& method,
+                                               const std::string& path,
+                                               const std::string& body_sha256) {
+    if (device_id_.empty() || device_secret_.empty()) {
+        ESP_LOGW(TAG, "Kids English device ID or secret is empty");
+    }
+
+    std::string timestamp = CurrentUnixMillisString();
+    uint32_t random_a = esp_random();
+    uint32_t random_b = esp_random();
+    std::string nonce = Board::GetInstance().GetUuid() + "-" + std::to_string(esp_timer_get_time()) +
+                        "-" + std::to_string(random_a) + std::to_string(random_b);
+    std::string payload = method + "\n" + path + "\n" + timestamp + "\n" + nonce + "\n" + body_sha256;
+    std::string signature_key = Sha256Hex(device_secret_);
+    std::string signature = HmacSha256Hex(signature_key, payload);
+
+    http->SetHeader("x-device-id", device_id_);
+    http->SetHeader("x-device-timestamp", timestamp);
+    http->SetHeader("x-device-nonce", nonce);
+    http->SetHeader("x-device-signature", signature);
+}
+
+std::string KidsEnglishProtocol::BuildDeviceHelloBody() const {
+    auto app_desc = esp_app_get_description();
+    std::string body = "{";
+    body += "\"capabilities\":{";
+    body += "\"microphone\":true,";
+    body += "\"speaker\":true,";
+    body += "\"touchScreen\":true,";
+    body += "\"wakeWord\":true";
+    body += "},";
+    body += "\"firmwareVersion\":" + JsonEscape(app_desc->version) + ",";
+    body += "\"hardwareModel\":" + JsonEscape(BOARD_NAME);
+    body += "}";
+    return body;
+}
+
+std::string KidsEnglishProtocol::BuildStartConversationBody(const char* trigger) const {
+    auto app_desc = esp_app_get_description();
+    std::string body = "{";
+    body += "\"firmwareVersion\":" + JsonEscape(app_desc->version) + ",";
+    body += "\"trigger\":" + JsonEscape(trigger == nullptr ? "manual" : trigger);
+    body += "}";
+    return body;
+}
+
+std::string KidsEnglishProtocol::BuildEndConversationBody(const char* reason) const {
+    std::string body = "{";
+    body += "\"reason\":" + JsonEscape(reason == nullptr ? "device_end" : reason);
+    body += "}";
+    return body;
+}
+
+std::string KidsEnglishProtocol::BuildMultipartAudioBody(const std::string& boundary,
+                                                        const std::string& wav,
+                                                        const std::string& client_turn_id,
+                                                        const std::string& recorded_at,
+                                                        int duration_ms) const {
+    auto append_field = [&](std::string& out, const std::string& name, const std::string& value) {
+        out += "--" + boundary + "\r\n";
+        out += "Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n";
+        out += value + "\r\n";
+    };
+
+    std::string body;
+    body.reserve(boundary.size() * 6 + wav.size() + client_turn_id.size() + recorded_at.size() + 256);
+    append_field(body, "clientTurnId", client_turn_id);
+    append_field(body, "recordedAt", recorded_at);
+    append_field(body, "durationMs", std::to_string(duration_ms));
+    body += "--" + boundary + "\r\n";
+    body += "Content-Disposition: form-data; name=\"audio\"; filename=\"sample.wav\"\r\n";
+    body += "Content-Type: audio/wav\r\n\r\n";
+    body += wav;
+    body += "\r\n--" + boundary + "--\r\n";
+    return body;
+}
+
+std::string KidsEnglishProtocol::GenerateClientTurnId() const {
+    uint32_t random_a = esp_random();
+    uint32_t random_b = esp_random();
+    char buffer[64];
+    snprintf(buffer, sizeof(buffer), "turn-%08lx%08lx", static_cast<unsigned long>(random_a),
+             static_cast<unsigned long>(random_b));
+    return std::string(buffer);
+}
+
+std::string KidsEnglishProtocol::CurrentUnixMillisString() const {
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    int64_t unix_ms = static_cast<int64_t>(tv.tv_sec) * 1000 + tv.tv_usec / 1000;
+    unix_ms += server_time_offset_ms_;
+    if (unix_ms < kUnixTimeReasonableMs) {
+        ESP_LOGW(TAG, "System time is not synced; signed request timestamp may be rejected");
+    }
+    return std::to_string(unix_ms);
+}
+
+std::string KidsEnglishProtocol::CurrentIsoTimestamp() const {
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    int64_t unix_ms = static_cast<int64_t>(tv.tv_sec) * 1000 + tv.tv_usec / 1000;
+    unix_ms += server_time_offset_ms_;
+    time_t seconds = static_cast<time_t>(unix_ms / 1000);
+    int millis = static_cast<int>(unix_ms % 1000);
+    if (millis < 0) {
+        millis += 1000;
+    }
+    struct tm utc;
+    gmtime_r(&seconds, &utc);
+    char buffer[64];
+    snprintf(buffer, sizeof(buffer), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", utc.tm_year + 1900,
+             utc.tm_mon + 1, utc.tm_mday, utc.tm_hour, utc.tm_min, utc.tm_sec, millis);
+    return std::string(buffer);
+}
+
+void KidsEnglishProtocol::UpdateServerTimeOffset(const cJSON* server_time) {
+    std::string timestamp = JsonString(server_time);
+    int64_t server_ms = 0;
+    if (!timestamp.empty() && ParseIsoUtcMillis(timestamp, server_ms)) {
+        struct timeval tv;
+        gettimeofday(&tv, nullptr);
+        int64_t local_ms = static_cast<int64_t>(tv.tv_sec) * 1000 + tv.tv_usec / 1000;
+        server_time_offset_ms_ = server_ms - local_ms;
+        ESP_LOGI(TAG, "Kids English server time offset: %lld ms",
+                 static_cast<long long>(server_time_offset_ms_));
+    }
+}
+
+void KidsEnglishProtocol::LogDeviceHelloResponse(const cJSON* root) const {
+    auto data = cJSON_GetObjectItem(root, "data");
+    auto device_state = cJSON_GetObjectItem(data, "deviceState");
+    auto settings = cJSON_GetObjectItem(data, "settings");
+    auto service_capabilities = cJSON_GetObjectItem(data, "serviceCapabilities");
+    auto audio_upload = cJSON_GetObjectItem(service_capabilities, "audioUpload");
+    auto tts_url = cJSON_GetObjectItem(service_capabilities, "ttsUrl");
+    auto streaming = cJSON_GetObjectItem(service_capabilities, "streaming");
+
+    ESP_LOGI(TAG,
+             "Device hello: deviceId=%s state=%s languageLevel=%s voice=%s "
+             "dailyPracticeMinutes=%d audioUpload=%s ttsUrl=%s streaming=%s",
+             device_id_.c_str(), JsonString(device_state).c_str(),
+             JsonString(cJSON_GetObjectItem(settings, "languageLevel")).c_str(),
+             JsonString(cJSON_GetObjectItem(settings, "voice")).c_str(),
+             JsonInt(cJSON_GetObjectItem(settings, "dailyPracticeMinutes"), 0),
+             cJSON_IsTrue(audio_upload) ? "true" : "false", cJSON_IsTrue(tts_url) ? "true" : "false",
+             cJSON_IsTrue(streaming) ? "true" : "false");
+}
+
 bool KidsEnglishProtocol::RequestJson(const std::string& method, const std::string& path,
                                       const std::string& body, cJSON** response_root,
-                                      int timeout_ms) {
+                                      int timeout_ms, bool authenticated) {
     if (response_root != nullptr) {
         *response_root = nullptr;
     }
@@ -240,11 +506,13 @@ bool KidsEnglishProtocol::RequestJson(const std::string& method, const std::stri
 
     http->SetTimeout(timeout_ms);
     http->SetHeader("Accept", "application/json");
-    if (!body.empty()) {
+    std::string body_sha256 = Sha256Hex(body);
+    if (method == "POST" || method == "PUT") {
         http->SetHeader("Content-Type", "application/json");
         http->SetContent(std::string(body));
-    } else if (method == "POST" || method == "PUT") {
-        http->SetContent(std::string());
+    }
+    if (authenticated) {
+        AddDeviceAuthHeaders(http.get(), method, path, body_sha256);
     }
 
     auto url = BuildUrl(path.c_str());
@@ -285,8 +553,10 @@ bool KidsEnglishProtocol::RequestJson(const std::string& method, const std::stri
 
 bool KidsEnglishProtocol::CheckHealth() {
     cJSON* root = nullptr;
-    bool ok = RequestJson("GET", "/health", "", &root, kHealthTimeoutMs);
+    bool ok = RequestJson("GET", "/health", "", &root, kHealthTimeoutMs, false);
     if (root != nullptr) {
+        auto data = cJSON_GetObjectItem(root, "data");
+        UpdateServerTimeOffset(cJSON_GetObjectItem(data, "timestamp"));
         cJSON_Delete(root);
     }
     if (!ok) {
@@ -295,36 +565,59 @@ bool KidsEnglishProtocol::CheckHealth() {
     return ok;
 }
 
-bool KidsEnglishProtocol::StartSession() {
+bool KidsEnglishProtocol::DeviceHello() {
     cJSON* root = nullptr;
-    if (!RequestJson("POST", "/api/sessions/start", "{}", &root, kStartSessionTimeoutMs)) {
+    std::string body = BuildDeviceHelloBody();
+    if (!RequestJson("POST", "/api/device/hello", body, &root, kDeviceHelloTimeoutMs)) {
         SetError(Lang::Strings::SERVER_NOT_CONNECTED);
         return false;
     }
 
-    bool ok = ParseStartSessionResponse(root);
+    auto data = cJSON_GetObjectItem(root, "data");
+    UpdateServerTimeOffset(cJSON_GetObjectItem(data, "serverTime"));
+    LogDeviceHelloResponse(root);
+    cJSON_Delete(root);
+    return true;
+}
+
+bool KidsEnglishProtocol::StartConversation(const char* trigger) {
+    cJSON* root = nullptr;
+    std::string body = BuildStartConversationBody(trigger);
+    if (!RequestJson("POST", "/api/conversations/start", body, &root, kStartConversationTimeoutMs)) {
+        SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        return false;
+    }
+
+    ConversationResponse response;
+    bool ok = ParseConversationResponse(root, response);
     cJSON_Delete(root);
     if (!ok) {
         SetError(Lang::Strings::SERVER_ERROR);
+        return false;
     }
-    return ok;
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        conversation_id_ = response.conversation_id;
+        session_id_ = conversation_id_;
+    }
+    ESP_LOGI(TAG, "Started conversation %s requestId=%s", response.conversation_id.c_str(),
+             response.request_id.c_str());
+    return HandleConversationResponse(response, "Let's speak English.");
 }
 
 bool KidsEnglishProtocol::UploadPendingAudio() {
     std::vector<int16_t> pcm;
-    std::string session_id;
-    std::string prompt_id;
-    std::string device_id = Board::GetInstance().GetUuid();
+    std::string conversation_id;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        session_id = session_id_;
-        prompt_id = prompt_id_;
+        conversation_id = conversation_id_;
         pending_audio_.clear();
         pcm = std::move(pending_pcm_);
     }
 
-    if (session_id.empty() || prompt_id.empty()) {
-        ESP_LOGE(TAG, "Missing session or prompt id");
+    if (conversation_id.empty()) {
+        ESP_LOGE(TAG, "Missing conversation id");
         return false;
     }
     if (pcm.empty()) {
@@ -361,27 +654,22 @@ bool KidsEnglishProtocol::UploadPendingAudio() {
     http->SetHeader("Content-Type", std::string("multipart/form-data; boundary=") + kMultipartBoundary);
 
     std::string wav = CreateWavFile(pcm, kPracticeAudioSampleRate);
-    auto url = BuildUrl("/api/practice/audio");
+    std::string client_turn_id = GenerateClientTurnId();
+    std::string recorded_at = CurrentIsoTimestamp();
+    std::string multipart_body =
+        BuildMultipartAudioBody(kMultipartBoundary, wav, client_turn_id, recorded_at, duration_ms);
+    std::string path = "/api/conversations/" + conversation_id + "/turns/audio";
+    AddDeviceAuthHeaders(http.get(), "POST", path, Sha256Hex(""));
+    http->SetContent(std::move(multipart_body));
+    auto url = BuildUrl(path.c_str());
     ESP_LOGI(TAG,
-             "Uploading Kids English audio: deviceId=%s sessionId=%s promptId=%s pcmBytes=%u "
+             "Uploading Kids English turn: deviceId=%s conversationId=%s clientTurnId=%s pcmBytes=%u "
              "wavBytes=%u durationMs=%d format=wav/%dHz/%dch/%dbit url=%s",
-             device_id.c_str(), session_id.c_str(), prompt_id.c_str(), (unsigned)pcm_bytes,
+             device_id_.c_str(), conversation_id.c_str(), client_turn_id.c_str(), (unsigned)pcm_bytes,
              (unsigned)wav.size(), duration_ms, kPracticeAudioSampleRate, kPracticeAudioChannels,
              kPracticeAudioBitsPerSample, url.c_str());
     if (!http->Open("POST", url)) {
         ESP_LOGE(TAG, "HTTP upload open failed, error=%d", http->GetLastError());
-        return false;
-    }
-
-    bool write_ok = WriteMultipartField(http.get(), kMultipartBoundary, "sessionId", session_id) &&
-                    WriteMultipartField(http.get(), kMultipartBoundary, "promptId", prompt_id) &&
-                    WriteMultipartField(http.get(), kMultipartBoundary, "deviceId", device_id) &&
-                    WriteMultipartAudio(http.get(), kMultipartBoundary, wav) &&
-                    WriteString(http.get(), std::string("--") + kMultipartBoundary + "--\r\n") &&
-                    FinishChunkedBody(http.get());
-    if (!write_ok) {
-        http->Close();
-        ESP_LOGE(TAG, "Failed to write multipart request");
         return false;
     }
 
@@ -392,6 +680,16 @@ bool KidsEnglishProtocol::UploadPendingAudio() {
              (unsigned)response.size());
     if (status < 200 || status >= 300) {
         ESP_LOGE(TAG, "Upload failed, status=%d, body=%s", status, response.c_str());
+        cJSON* error_root = cJSON_Parse(response.c_str());
+        if (status == 409 && IsConversationEndedError(error_root)) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            conversation_id_.clear();
+            session_id_.clear();
+            ESP_LOGW(TAG, "Conversation already ended; local conversation state cleared");
+        }
+        if (error_root != nullptr) {
+            cJSON_Delete(error_root);
+        }
         return false;
     }
 
@@ -404,94 +702,82 @@ bool KidsEnglishProtocol::UploadPendingAudio() {
     auto ok = cJSON_GetObjectItem(root, "ok");
     if (!cJSON_IsTrue(ok)) {
         ESP_LOGE(TAG, "Upload returned error: %s", GetErrorMessage(root).c_str());
+        if (IsConversationEndedError(root)) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            conversation_id_.clear();
+            session_id_.clear();
+        }
         cJSON_Delete(root);
         return false;
     }
 
-    PracticeResult result;
-    bool parsed = ParsePracticeResult(root, result);
+    ConversationResponse result;
+    bool parsed = ParseConversationResponse(root, result);
     cJSON_Delete(root);
     if (!parsed) {
         return false;
     }
 
     ESP_LOGI(TAG,
-             "Kids English ASR result: deviceId=%s sessionId=%s promptId=%s requestId=%s "
-             "recordingBytes=%u httpStatus=%d recognizedText=\"%s\" score=%d "
-             "asrDurationMs=%d audioBytes=%d audioDurationSeconds=%.2f",
-             device_id.c_str(), session_id.c_str(), prompt_id.c_str(), result.request_id.c_str(),
-             (unsigned)pcm_bytes, status, result.recognized_text.c_str(), result.score,
-             result.asr_duration_ms, result.audio_bytes, result.audio_duration_seconds);
-    EmitPracticeResult(result);
-    return true;
+             "Kids English turn result: deviceId=%s conversationId=%s turnId=%s requestId=%s "
+             "recordingBytes=%u httpStatus=%d asrDurationMs=%d llmDurationMs=%d "
+             "ttsDurationMs=%d totalDurationMs=%d",
+             device_id_.c_str(), conversation_id.c_str(), result.turn_id.c_str(),
+             result.request_id.c_str(), (unsigned)pcm_bytes, status, result.asr_duration_ms,
+             result.llm_duration_ms, result.tts_duration_ms, result.total_duration_ms);
+    EmitSttMessage("Audio submitted.");
+    return HandleConversationResponse(result, "I heard you.");
 }
 
-bool KidsEnglishProtocol::ParseStartSessionResponse(const cJSON* root) {
-    auto data = cJSON_GetObjectItem(root, "data");
-    auto session_id = cJSON_GetObjectItem(data, "sessionId");
-    auto prompt = cJSON_GetObjectItem(data, "prompt");
-    auto prompt_id = cJSON_GetObjectItem(prompt, "id");
-    auto prompt_text = cJSON_GetObjectItem(prompt, "text");
-    auto prompt_level = cJSON_GetObjectItem(prompt, "level");
-    if (!cJSON_IsString(session_id) || !cJSON_IsString(prompt_id) || !cJSON_IsString(prompt_text)) {
-        ESP_LOGE(TAG, "Invalid start session response");
-        return false;
+bool KidsEnglishProtocol::EndConversation(const std::string& conversation_id) {
+    std::string path = "/api/conversations/" + conversation_id + "/end";
+    cJSON* root = nullptr;
+    std::string body = BuildEndConversationBody("device_end");
+    bool ok = RequestJson("POST", path, body, &root, kStartConversationTimeoutMs);
+    if (root != nullptr) {
+        auto data = cJSON_GetObjectItem(root, "data");
+        ESP_LOGI(TAG, "Ended conversation %s state=%s endedAt=%s", conversation_id.c_str(),
+                 JsonString(cJSON_GetObjectItem(data, "deviceState")).c_str(),
+                 JsonString(cJSON_GetObjectItem(data, "endedAt")).c_str());
+        cJSON_Delete(root);
     }
-
-    session_id_ = session_id->valuestring;
-    prompt_id_ = prompt_id->valuestring;
-    prompt_text_ = prompt_text->valuestring;
-    prompt_level_ = JsonString(prompt_level);
-    ESP_LOGI(TAG, "Practice session %s, prompt %s: %s", session_id_.c_str(), prompt_id_.c_str(),
-             prompt_text_.c_str());
-    return true;
+    return ok;
 }
 
-bool KidsEnglishProtocol::ParsePracticeResult(const cJSON* root, PracticeResult& result) {
+bool KidsEnglishProtocol::ParseConversationResponse(const cJSON* root, ConversationResponse& result) {
     auto data = cJSON_GetObjectItem(root, "data");
-    auto recognized_text = cJSON_GetObjectItem(data, "recognizedText");
-    auto score = cJSON_GetObjectItem(data, "score");
-    auto feedback = cJSON_GetObjectItem(data, "feedback");
-    auto correction = cJSON_GetObjectItem(data, "correction");
-    auto next_prompt = cJSON_GetObjectItem(data, "nextPrompt");
-    auto next_prompt_id = cJSON_GetObjectItem(next_prompt, "id");
-    auto next_prompt_text = cJSON_GetObjectItem(next_prompt, "text");
-    auto tts_text = cJSON_GetObjectItem(data, "ttsText");
+    auto conversation_id = cJSON_GetObjectItem(data, "conversationId");
+    auto turn_id = cJSON_GetObjectItem(data, "turnId");
+    auto device_state = cJSON_GetObjectItem(data, "deviceState");
+    auto screen_cue = cJSON_GetObjectItem(data, "screenCue");
     auto tts_audio_url = cJSON_GetObjectItem(data, "ttsAudioUrl");
+    auto audio_format = cJSON_GetObjectItem(data, "audioFormat");
+    auto should_continue_listening = cJSON_GetObjectItem(data, "shouldContinueListening");
     auto diagnostics = cJSON_GetObjectItem(data, "diagnostics");
     auto request_id = cJSON_GetObjectItem(diagnostics, "requestId");
-    auto provider = cJSON_GetObjectItem(diagnostics, "provider");
-    auto mode = cJSON_GetObjectItem(diagnostics, "mode");
     auto asr_duration_ms = cJSON_GetObjectItem(diagnostics, "asrDurationMs");
+    auto llm_duration_ms = cJSON_GetObjectItem(diagnostics, "llmDurationMs");
     auto tts_duration_ms = cJSON_GetObjectItem(diagnostics, "ttsDurationMs");
     auto total_duration_ms = cJSON_GetObjectItem(diagnostics, "totalDurationMs");
-    auto audio_bytes = cJSON_GetObjectItem(diagnostics, "audioBytes");
-    auto audio_duration_seconds = cJSON_GetObjectItem(diagnostics, "audioDurationSeconds");
-    auto audio_mime_type = cJSON_GetObjectItem(diagnostics, "audioMimeType");
 
-    if (!cJSON_IsString(recognized_text) || !cJSON_IsNumber(score) || !cJSON_IsString(feedback) ||
-        !cJSON_IsString(next_prompt_id) || !cJSON_IsString(next_prompt_text)) {
-        ESP_LOGE(TAG, "Invalid practice result response");
+    if (!cJSON_IsString(conversation_id) || !cJSON_IsString(device_state) ||
+        !cJSON_IsString(tts_audio_url)) {
+        ESP_LOGE(TAG, "Invalid conversation response");
         return false;
     }
 
-    result.recognized_text = recognized_text->valuestring;
-    result.score = score->valueint;
-    result.feedback = feedback->valuestring;
-    result.correction = JsonString(correction);
-    result.next_prompt_id = next_prompt_id->valuestring;
-    result.next_prompt_text = next_prompt_text->valuestring;
-    result.tts_text = JsonString(tts_text);
+    result.conversation_id = conversation_id->valuestring;
+    result.turn_id = JsonString(turn_id);
+    result.device_state = device_state->valuestring;
+    result.screen_cue = JsonString(screen_cue);
     result.tts_audio_url = JsonString(tts_audio_url);
+    result.audio_format = JsonString(audio_format);
+    result.should_continue_listening = JsonBool(should_continue_listening, true);
     result.request_id = JsonString(request_id);
-    result.provider = JsonString(provider);
-    result.mode = JsonString(mode);
     result.asr_duration_ms = JsonInt(asr_duration_ms);
+    result.llm_duration_ms = JsonInt(llm_duration_ms);
     result.tts_duration_ms = JsonInt(tts_duration_ms);
     result.total_duration_ms = JsonInt(total_duration_ms);
-    result.audio_bytes = JsonInt(audio_bytes);
-    result.audio_duration_seconds = JsonDouble(audio_duration_seconds);
-    result.audio_mime_type = JsonString(audio_mime_type);
     return true;
 }
 
@@ -637,86 +923,67 @@ bool KidsEnglishProtocol::ReadHttpBody(Http* http, std::string& body) {
     return true;
 }
 
-bool KidsEnglishProtocol::WriteMultipartField(Http* http, const std::string& boundary,
-                                              const std::string& name, const std::string& value) {
-    std::string data = "--" + boundary + "\r\n";
-    data += "Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n";
-    data += value + "\r\n";
-    return WriteString(http, data);
-}
-
-bool KidsEnglishProtocol::WriteMultipartAudio(Http* http, const std::string& boundary,
-                                              const std::string& wav) {
-    std::string header = "--" + boundary + "\r\n";
-    header += "Content-Disposition: form-data; name=\"audio\"; filename=\"practice.wav\"\r\n";
-    header += "Content-Type: audio/wav\r\n\r\n";
-    if (!WriteString(http, header)) {
-        return false;
-    }
-    if (http->Write(wav.data(), wav.size()) <= 0) {
-        return false;
-    }
-    return WriteString(http, "\r\n");
-}
-
-bool KidsEnglishProtocol::WriteString(Http* http, const std::string& data) {
-    return http->Write(data.data(), data.size()) > 0;
-}
-
-bool KidsEnglishProtocol::FinishChunkedBody(Http* http) {
-    return http->Write(nullptr, 0) > 0;
-}
-
-void KidsEnglishProtocol::EmitPromptMessage() {
-    EmitEmotion("happy");
-    EmitAssistantMessage("Say: " + prompt_text_);
-}
-
-void KidsEnglishProtocol::EmitPracticeResult(const PracticeResult& result) {
-    EmitSttMessage(result.recognized_text);
-
+bool KidsEnglishProtocol::HandleConversationResponse(const ConversationResponse& response,
+                                                     const char* fallback_text) {
     ESP_LOGI(TAG,
-             "Practice diagnostics: requestId=%s provider=%s mode=%s asrDurationMs=%d "
-             "ttsDurationMs=%d totalDurationMs=%d audioBytes=%d audioDurationSeconds=%.2f "
-             "audioMimeType=%s",
-             result.request_id.c_str(), result.provider.c_str(), result.mode.c_str(),
-             result.asr_duration_ms, result.tts_duration_ms, result.total_duration_ms,
-             result.audio_bytes, result.audio_duration_seconds, result.audio_mime_type.c_str());
-
-    std::string message = result.feedback;
-    message += " Score: " + std::to_string(result.score);
-    if (!result.correction.empty()) {
-        message += ". " + result.correction;
-    }
-    if (!result.next_prompt_text.empty()) {
-        message += "\nNext: " + result.next_prompt_text;
-    }
-
-    EmitTtsMessage("start");
-    EmitAssistantMessage(message);
-    if (!result.tts_audio_url.empty()) {
-        ESP_LOGI(TAG, "Practice ttsAudioUrl: %s", result.tts_audio_url.c_str());
-        if (!DownloadAndPlayTtsAudio(result.tts_audio_url)) {
-            ESP_LOGW(TAG, "Failed to download/play TTS audio; falling back to text-only feedback");
-        }
-    }
-    EmitTtsMessage("stop", result.tts_text.empty() ? message.c_str() : result.tts_text.c_str());
-    EmitEmotion(result.score >= 80 ? "happy" : "thinking");
+             "Conversation response: conversationId=%s turnId=%s state=%s cue=%s tts=%s "
+             "format=%s continue=%s requestId=%s asr=%d llm=%d ttsMs=%d total=%d",
+             response.conversation_id.c_str(), response.turn_id.c_str(),
+             response.device_state.c_str(), response.screen_cue.c_str(),
+             response.tts_audio_url.c_str(), response.audio_format.c_str(),
+             response.should_continue_listening ? "true" : "false", response.request_id.c_str(),
+             response.asr_duration_ms, response.llm_duration_ms, response.tts_duration_ms,
+             response.total_duration_ms);
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        prompt_id_ = result.next_prompt_id;
-        prompt_text_ = result.next_prompt_text;
+        if (!response.conversation_id.empty()) {
+            conversation_id_ = response.conversation_id;
+            session_id_ = conversation_id_;
+        }
+        if (!response.turn_id.empty()) {
+            last_turn_id_ = response.turn_id;
+        }
     }
+
+    EmitTtsMessage("start");
+    EmitAssistantMessage(fallback_text == nullptr ? "Let's keep talking." : fallback_text);
+    bool played = true;
+    if (!response.tts_audio_url.empty()) {
+        ESP_LOGI(TAG, "Conversation ttsAudioUrl: %s", response.tts_audio_url.c_str());
+        if (!DownloadAndPlayTtsAudio(response.tts_audio_url)) {
+            ESP_LOGW(TAG, "Failed to download/play TTS audio; falling back to text-only feedback");
+            played = false;
+        }
+    } else {
+        played = false;
+    }
+
+    if (!response.should_continue_listening) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        conversation_id_.clear();
+        session_id_.clear();
+    }
+    EmitTtsMessage("stop", fallback_text, response.should_continue_listening);
+    EmitEmotion(response.should_continue_listening ? "happy" : "neutral");
+    return played;
 }
 
-void KidsEnglishProtocol::EmitTtsMessage(const char* state, const char* text) {
+bool KidsEnglishProtocol::IsConversationEndedError(const cJSON* root) const {
+    auto error = cJSON_GetObjectItem(root, "error");
+    auto code = cJSON_GetObjectItem(error, "code");
+    return JsonString(code) == "CONVERSATION_ENDED";
+}
+
+void KidsEnglishProtocol::EmitTtsMessage(const char* state, const char* text,
+                                         bool continue_listening) {
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "type", "tts");
     cJSON_AddStringToObject(root, "state", state);
     if (text != nullptr) {
         cJSON_AddStringToObject(root, "text", text);
     }
+    cJSON_AddBoolToObject(root, "continue_listening", continue_listening);
     DispatchJson(root);
 }
 
