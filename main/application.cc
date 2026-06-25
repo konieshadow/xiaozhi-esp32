@@ -535,27 +535,35 @@ void Application::InitializeProtocol() {
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
                     aborted_ = false;
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+                    if (GetDeviceState() == kDeviceStateConnecting) {
+                        SetDeviceState(kDeviceStateListening);
+                    }
+#endif
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 auto continue_listening = cJSON_GetObjectItem(root, "continue_listening");
                 bool should_continue_listening = cJSON_IsTrue(continue_listening);
                 Schedule([this, should_continue_listening]() {
-                    if (GetDeviceState() == kDeviceStateSpeaking) {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
+                    auto state = GetDeviceState();
+                    if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
                         if (should_continue_listening) {
                             SetDeviceState(kDeviceStateListening);
                         } else {
                             SetDeviceState(kDeviceStateIdle);
                         }
+                    }
 #else
+                    if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
                             SetDeviceState(kDeviceStateIdle);
                         } else {
                             SetDeviceState(kDeviceStateListening);
                         }
-#endif
                     }
+#endif
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
@@ -735,6 +743,10 @@ void Application::SendSimulatedRecording(const std::string& text) {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
     if (kids_english_simulated_recording_task_handle_ != nullptr) {
         Board::GetInstance().GetDisplay()->ShowNotification("模拟录音进行中");
+        return;
+    }
+    if (kids_english_submit_recording_task_handle_ != nullptr) {
+        Board::GetInstance().GetDisplay()->ShowNotification("录音提交中");
         return;
     }
 
@@ -962,6 +974,12 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
 
 void Application::SubmitKidsEnglishRecording() {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (kids_english_submit_recording_task_handle_ != nullptr) {
+        ESP_LOGW(TAG, "Kids English recording submission already running");
+        Board::GetInstance().GetDisplay()->ShowNotification("录音提交中");
+        return;
+    }
+
     audio_service_.EnableVoiceProcessing(false);
     vTaskDelay(pdMS_TO_TICKS(OPUS_FRAME_DURATION_MS * 2));
     auto pcm = audio_service_.EndPcmCapture();
@@ -970,18 +988,89 @@ void Application::SubmitKidsEnglishRecording() {
              (unsigned)(pcm.size() * 1000 / 16000));
     while (audio_service_.PopPacketFromSendQueue()) {
     }
-    if (protocol_ && !pcm.empty()) {
-        auto kids_protocol = static_cast<KidsEnglishProtocol*>(protocol_.get());
-        if (!kids_protocol->SendPcmAudio(std::move(pcm))) {
-            ESP_LOGW(TAG, "Failed to submit Kids English PCM recording");
-        } else {
+
+    if (pcm.empty()) {
+        ESP_LOGW(TAG, "No Kids English PCM recording captured");
+        if (protocol_) {
             protocol_->SendStopListening();
         }
-    } else if (protocol_) {
-        ESP_LOGW(TAG, "No Kids English PCM recording captured");
-        protocol_->SendStopListening();
         SetDeviceState(kDeviceStateIdle);
+        return;
     }
+
+    StartKidsEnglishRecordingSubmission(std::move(pcm), "microphone");
+#endif
+}
+
+bool Application::StartKidsEnglishRecordingSubmission(std::vector<int16_t>&& pcm, const char* source) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (kids_english_submit_recording_task_handle_ != nullptr) {
+        ESP_LOGW(TAG, "Kids English recording submission already running");
+        Board::GetInstance().GetDisplay()->ShowNotification("录音提交中");
+        return false;
+    }
+    if (pcm.empty()) {
+        ESP_LOGW(TAG, "Refusing to submit empty Kids English %s recording", source);
+        SetDeviceState(kDeviceStateIdle);
+        return false;
+    }
+    if (protocol_ == nullptr) {
+        ESP_LOGE(TAG, "Kids English %s recording submission failed: protocol not initialized", source);
+        SetDeviceState(kDeviceStateIdle);
+        return false;
+    }
+
+    auto task_pcm = new std::vector<int16_t>(std::move(pcm));
+    SetDeviceState(kDeviceStateSpeaking);
+    BaseType_t created = xTaskCreate([](void* arg) {
+        std::unique_ptr<std::vector<int16_t>> pcm(static_cast<std::vector<int16_t>*>(arg));
+        auto& app = Application::GetInstance();
+        app.KidsEnglishSubmitRecordingTask(std::move(*pcm));
+        app.kids_english_submit_recording_task_handle_ = nullptr;
+        vTaskDelete(NULL);
+    }, "kids_submit", 4096 * 3, task_pcm, 3, &kids_english_submit_recording_task_handle_);
+    if (created != pdPASS) {
+        delete task_pcm;
+        kids_english_submit_recording_task_handle_ = nullptr;
+        ESP_LOGE(TAG, "Failed to create Kids English %s recording submission task", source);
+        Board::GetInstance().GetDisplay()->ShowNotification("录音提交启动失败");
+        SetDeviceState(kDeviceStateIdle);
+        return false;
+    }
+    ESP_LOGI(TAG, "Queued Kids English %s recording submission", source);
+    return true;
+#else
+    (void)pcm;
+    (void)source;
+    return false;
+#endif
+}
+
+void Application::KidsEnglishSubmitRecordingTask(std::vector<int16_t> pcm) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    bool submitted = false;
+    if (protocol_ == nullptr) {
+        ESP_LOGE(TAG, "Kids English recording submission failed: protocol not initialized");
+    } else {
+        auto kids_protocol = static_cast<KidsEnglishProtocol*>(protocol_.get());
+        submitted = kids_protocol->SendPcmAudio(std::move(pcm));
+        if (submitted) {
+            ESP_LOGI(TAG, "Submitting Kids English recording to server");
+            protocol_->SendStopListening();
+        } else {
+            ESP_LOGW(TAG, "Failed to queue Kids English PCM recording for upload");
+        }
+    }
+
+    if (!submitted) {
+        Schedule([]() {
+            auto display = Board::GetInstance().GetDisplay();
+            display->ShowNotification("录音提交失败");
+            Application::GetInstance().SetDeviceState(kDeviceStateIdle);
+        });
+    }
+#else
+    (void)pcm;
 #endif
 }
 
@@ -1038,7 +1127,7 @@ void Application::KidsEnglishSimulatedRecordingTask(std::string text) {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
     Schedule([text]() {
         auto display = Board::GetInstance().GetDisplay();
-        display->ShowNotification("发送模拟录音", 2000);
+        display->ShowNotification("准备模拟录音", 2000);
         display->SetChatMessage("user", text.c_str());
     });
 
@@ -1046,12 +1135,35 @@ void Application::KidsEnglishSimulatedRecordingTask(std::string text) {
     if (protocol_ == nullptr) {
         ESP_LOGE(TAG, "Simulated recording failed: protocol not initialized");
     } else {
-        ok = static_cast<KidsEnglishProtocol*>(protocol_.get())->SendSimulatedRecording(text);
+        auto kids_protocol = static_cast<KidsEnglishProtocol*>(protocol_.get());
+        if (!protocol_->IsAudioChannelOpened()) {
+            kids_protocol->SetNextConversationTrigger("touch");
+            SetDeviceState(kDeviceStateConnecting);
+            Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+            if (!protocol_->OpenAudioChannel()) {
+                ESP_LOGE(TAG, "Simulated recording failed to open audio channel");
+                SetDeviceState(kDeviceStateIdle);
+            }
+        }
+
+        if (protocol_->IsAudioChannelOpened()) {
+            audio_service_.WaitForPlaybackQueueEmpty();
+
+            std::vector<int16_t> pcm;
+            SetListeningMode(kListeningModeManualStop);
+            if (kids_protocol->GenerateSimulatedRecordingPcm(text, pcm)) {
+                audio_service_.EnableVoiceProcessing(false);
+                audio_service_.EndPcmCapture();
+                while (audio_service_.PopPacketFromSendQueue()) {
+                }
+                ok = StartKidsEnglishRecordingSubmission(std::move(pcm), "simulated");
+            }
+        }
     }
 
     Schedule([ok]() {
         auto display = Board::GetInstance().GetDisplay();
-        display->ShowNotification(ok ? "模拟录音已发送" : "模拟录音失败", 3000);
+        display->ShowNotification(ok ? "模拟录音已提交" : "模拟录音失败", 3000);
         if (!ok) {
             display->SetChatMessage("system", "Simulated recording failed");
         }

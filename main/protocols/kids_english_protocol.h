@@ -22,7 +22,7 @@ public:
     bool IsAudioChannelOpened() const override;
     bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) override;
     bool SendPcmAudio(std::vector<int16_t>&& pcm);
-    bool SendSimulatedRecording(const std::string& text);
+    bool GenerateSimulatedRecordingPcm(const std::string& text, std::vector<int16_t>& pcm);
     bool RunSelfTest();
     void SetNextConversationTrigger(const std::string& trigger);
     void SendStartListening(ListeningMode mode) override;
@@ -123,7 +123,8 @@ private:
     bool DownloadWavAudio(const std::string& url, std::vector<int16_t>& pcm, int& sample_rate,
                           std::string* content_type = nullptr);
     bool ReadHttpBody(Http* http, std::string& body);
-    bool HandleConversationResponse(const ConversationResponse& response, const char* fallback_text);
+    bool HandleConversationResponse(const ConversationResponse& response, const char* fallback_text,
+                                    bool wait_for_playback = false);
     bool IsConversationEndedError(const cJSON* root) const;
     void EmitTtsMessage(const char* state, const char* text = nullptr,
                         bool continue_listening = true);

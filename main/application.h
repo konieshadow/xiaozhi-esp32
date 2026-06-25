@@ -11,6 +11,7 @@
 #include <deque>
 #include <memory>
 #include <functional>
+#include <vector>
 
 #include "protocol.h"
 #include "ota.h"
@@ -150,6 +151,7 @@ private:
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
     TaskHandle_t kids_english_self_test_task_handle_ = nullptr;
+    TaskHandle_t kids_english_submit_recording_task_handle_ = nullptr;
     TaskHandle_t kids_english_simulated_recording_task_handle_ = nullptr;
 
 
@@ -165,8 +167,10 @@ private:
     void ContinueOpenAudioChannel(ListeningMode mode);
     void ContinueWakeWordInvoke(const std::string& wake_word);
     void SubmitKidsEnglishRecording();
+    bool StartKidsEnglishRecordingSubmission(std::vector<int16_t>&& pcm, const char* source);
     void MaybeStartKidsEnglishSelfTest();
     void KidsEnglishSelfTestTask();
+    void KidsEnglishSubmitRecordingTask(std::vector<int16_t> pcm);
     void KidsEnglishSimulatedRecordingTask(std::string text);
 
     // Activation task (runs in background)

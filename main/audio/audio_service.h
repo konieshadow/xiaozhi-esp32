@@ -175,6 +175,7 @@ private:
     std::deque<std::unique_ptr<AudioTask>> audio_encode_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
     bool pcm_capture_enabled_ = false;
+    bool playback_active_ = false;
     std::vector<int16_t> pcm_capture_buffer_;
     // For server AEC
     std::deque<uint32_t> timestamp_queue_;
