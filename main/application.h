@@ -148,6 +148,7 @@ private:
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
+    TaskHandle_t kids_english_self_test_task_handle_ = nullptr;
 
 
     // Event handlers
@@ -162,6 +163,8 @@ private:
     void ContinueOpenAudioChannel(ListeningMode mode);
     void ContinueWakeWordInvoke(const std::string& wake_word);
     void SubmitKidsEnglishRecording();
+    void MaybeStartKidsEnglishSelfTest();
+    void KidsEnglishSelfTestTask();
 
     // Activation task (runs in background)
     void ActivationTask();

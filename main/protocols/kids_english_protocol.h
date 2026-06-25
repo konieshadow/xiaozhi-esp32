@@ -3,10 +3,10 @@
 
 #include "protocol.h"
 
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <cstdint>
 #include <vector>
 
 class Http;
@@ -22,6 +22,7 @@ public:
     bool IsAudioChannelOpened() const override;
     bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) override;
     bool SendPcmAudio(std::vector<int16_t>&& pcm);
+    bool RunSelfTest();
     void SetNextConversationTrigger(const std::string& trigger);
     void SendStartListening(ListeningMode mode) override;
     void SendStopListening() override;
@@ -43,6 +44,32 @@ private:
         int llm_duration_ms = -1;
         int tts_duration_ms = -1;
         int total_duration_ms = -1;
+        bool provider_fallback = false;
+        std::string provider_error_code;
+    };
+
+    struct StandaloneTtsResponse {
+        std::string tts_audio_url;
+        std::string audio_format;
+        std::string request_id;
+        int tts_duration_ms = -1;
+        int total_duration_ms = -1;
+        bool provider_fallback = false;
+        std::string provider_error_code;
+    };
+
+    struct StandaloneAsrResponse {
+        std::string transcript;
+        std::string audio_format;
+        std::string request_id;
+        int asr_duration_ms = -1;
+        int total_duration_ms = -1;
+    };
+
+    enum class UploadResult {
+        kSuccess,
+        kFailed,
+        kConversationEnded,
     };
 
     std::string base_url_;
@@ -66,6 +93,9 @@ private:
     std::string BuildDeviceHelloBody() const;
     std::string BuildStartConversationBody(const char* trigger) const;
     std::string BuildEndConversationBody(const char* reason) const;
+    std::string BuildStandaloneTtsBody(const std::string& text) const;
+    std::string BuildStandaloneAsrMultipartBody(const std::string& boundary, const std::string& wav,
+                                                const std::string& prompt_text) const;
     std::string BuildMultipartAudioBody(const std::string& boundary, const std::string& wav,
                                         const std::string& client_turn_id,
                                         const std::string& recorded_at, int duration_ms) const;
@@ -78,11 +108,19 @@ private:
     bool DeviceHello();
     bool StartConversation(const char* trigger = "manual");
     bool UploadPendingAudio();
+    UploadResult UploadPcmAudio(std::vector<int16_t>&& pcm, const std::string& conversation_id);
+    bool RequestStandaloneTts(const std::string& text, StandaloneTtsResponse& response);
+    bool UploadStandaloneAsrAudio(const std::string& wav, const std::string& prompt_text,
+                                  StandaloneAsrResponse& response);
     bool EndConversation(const std::string& conversation_id);
     bool DownloadAndPlayTtsAudio(const std::string& url);
     bool ParseConversationResponse(const cJSON* root, ConversationResponse& response);
+    bool ParseStandaloneTtsResponse(const cJSON* root, StandaloneTtsResponse& response);
+    bool ParseStandaloneAsrResponse(const cJSON* root, StandaloneAsrResponse& response);
     std::string CreateWavFile(const std::vector<int16_t>& pcm, int sample_rate) const;
     bool ParseWavPcm16Mono(const std::string& wav, std::vector<int16_t>& pcm, int& sample_rate) const;
+    bool DownloadWavAudio(const std::string& url, std::vector<int16_t>& pcm, int& sample_rate,
+                          std::string* content_type = nullptr);
     bool ReadHttpBody(Http* http, std::string& body);
     bool HandleConversationResponse(const ConversationResponse& response, const char* fallback_text);
     bool IsConversationEndedError(const cJSON* root) const;

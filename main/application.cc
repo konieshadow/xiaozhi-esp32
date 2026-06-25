@@ -320,6 +320,8 @@ void Application::HandleActivationDoneEvent() {
         // Play the success sound to indicate the device is ready
         audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
     });
+
+    MaybeStartKidsEnglishSelfTest();
 }
 
 void Application::ActivationTask() {
@@ -954,6 +956,55 @@ void Application::SubmitKidsEnglishRecording() {
         protocol_->SendStopListening();
         SetDeviceState(kDeviceStateIdle);
     }
+#endif
+}
+
+void Application::MaybeStartKidsEnglishSelfTest() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER && CONFIG_KIDS_ENGLISH_AUTO_SELF_TEST
+    if (kids_english_self_test_task_handle_ != nullptr) {
+        ESP_LOGW(TAG, "Kids English self-test task already running");
+        return;
+    }
+    ESP_LOGI(TAG, "Scheduling unattended Kids English hardware self-test");
+    xTaskCreate([](void* arg) {
+        Application* app = static_cast<Application*>(arg);
+        app->KidsEnglishSelfTestTask();
+        app->kids_english_self_test_task_handle_ = nullptr;
+        vTaskDelete(NULL);
+    }, "kids_self_test", 4096 * 2, this, 3, &kids_english_self_test_task_handle_);
+#endif
+}
+
+void Application::KidsEnglishSelfTestTask() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER && CONFIG_KIDS_ENGLISH_AUTO_SELF_TEST
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    Schedule([]() {
+        auto display = Board::GetInstance().GetDisplay();
+        display->SetStatus("Kids English test");
+        display->SetChatMessage("system", "Running unattended Kids English self-test");
+    });
+
+    bool passed = false;
+    if (protocol_ == nullptr) {
+        ESP_LOGE(TAG, "KIDS_ENGLISH_SELF_TEST_FAIL step=protocol reason=not_initialized");
+    } else {
+        SetDeviceState(kDeviceStateConnecting);
+        auto& board = Board::GetInstance();
+        board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+        passed = static_cast<KidsEnglishProtocol*>(protocol_.get())->RunSelfTest();
+        audio_service_.WaitForPlaybackQueueEmpty();
+        if (protocol_->IsAudioChannelOpened()) {
+            protocol_->CloseAudioChannel(false);
+        }
+        board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+    }
+
+    Schedule([this, passed]() {
+        auto display = Board::GetInstance().GetDisplay();
+        display->SetChatMessage("system", passed ? "Kids English self-test passed"
+                                                 : "Kids English self-test failed");
+        SetDeviceState(kDeviceStateIdle);
+    });
 #endif
 }
 

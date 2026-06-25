@@ -37,8 +37,10 @@ constexpr int kHealthTimeoutMs = 3000;
 constexpr int kDeviceHelloTimeoutMs = 5000;
 constexpr int kStartConversationTimeoutMs = 5000;
 constexpr int kUploadTimeoutMs = 20000;
+constexpr int kStandaloneSpeechTimeoutMs = 20000;
 constexpr int kTtsDownloadTimeoutMs = 10000;
 constexpr char kMultipartBoundary[] = "----xiaozhi-kids-english-boundary";
+constexpr char kSelfTestSpeechText[] = "I like apples.";
 constexpr int kPracticeAudioSampleRate = 16000;
 constexpr int kPracticeAudioChannels = 1;
 constexpr int kPracticeAudioBitsPerSample = 16;
@@ -164,6 +166,7 @@ uint32_t ReadLe32(const char* data) {
            (static_cast<uint32_t>(static_cast<uint8_t>(data[2])) << 16) |
            (static_cast<uint32_t>(static_cast<uint8_t>(data[3])) << 24);
 }
+
 }  // namespace
 
 KidsEnglishProtocol::KidsEnglishProtocol()
@@ -271,6 +274,123 @@ bool KidsEnglishProtocol::SendPcmAudio(std::vector<int16_t>&& pcm) {
         return false;
     }
     pending_pcm_ = std::move(pcm);
+    return true;
+}
+
+bool KidsEnglishProtocol::RunSelfTest() {
+    ESP_LOGI(TAG, "KIDS_ENGLISH_SELF_TEST_BEGIN baseUrl=%s deviceId=%s", base_url_.c_str(),
+             device_id_.c_str());
+    error_occurred_ = false;
+
+    if (base_url_.empty()) {
+        ESP_LOGE(TAG, "KIDS_ENGLISH_SELF_TEST_FAIL reason=missing_server_url");
+        SetError("Kids English server URL is empty");
+        return false;
+    }
+
+    if (!CheckHealth()) {
+        ESP_LOGE(TAG, "KIDS_ENGLISH_SELF_TEST_FAIL step=health");
+        return false;
+    }
+    ESP_LOGI(TAG, "KIDS_ENGLISH_SELF_TEST_STEP health ok");
+
+    if (!DeviceHello()) {
+        ESP_LOGE(TAG, "KIDS_ENGLISH_SELF_TEST_FAIL step=device_hello");
+        return false;
+    }
+    ESP_LOGI(TAG, "KIDS_ENGLISH_SELF_TEST_STEP device_hello ok");
+
+    StandaloneTtsResponse standalone_tts;
+    if (!RequestStandaloneTts(kSelfTestSpeechText, standalone_tts)) {
+        ESP_LOGE(TAG, "KIDS_ENGLISH_SELF_TEST_FAIL step=standalone_tts");
+        return false;
+    }
+    ESP_LOGI(TAG,
+             "KIDS_ENGLISH_SELF_TEST_STEP standalone_tts ok requestId=%s format=%s "
+             "ttsUrl=%s providerFallback=%s providerErrorCode=%s",
+             standalone_tts.request_id.c_str(), standalone_tts.audio_format.c_str(),
+             standalone_tts.tts_audio_url.c_str(),
+             standalone_tts.provider_fallback ? "true" : "false",
+             standalone_tts.provider_error_code.c_str());
+
+    std::vector<int16_t> self_test_pcm;
+    int self_test_sample_rate = 0;
+    if (!DownloadWavAudio(standalone_tts.tts_audio_url, self_test_pcm, self_test_sample_rate)) {
+        ESP_LOGE(TAG, "KIDS_ENGLISH_SELF_TEST_FAIL step=download_standalone_tts");
+        return false;
+    }
+    if (self_test_sample_rate != kPracticeAudioSampleRate) {
+        ESP_LOGE(TAG, "KIDS_ENGLISH_SELF_TEST_FAIL step=download_standalone_tts sampleRate=%d",
+                 self_test_sample_rate);
+        return false;
+    }
+    std::string self_test_wav = CreateWavFile(self_test_pcm, self_test_sample_rate);
+    ESP_LOGI(TAG, "KIDS_ENGLISH_SELF_TEST_STEP download_standalone_tts ok samples=%u wavBytes=%u",
+             (unsigned)self_test_pcm.size(), (unsigned)self_test_wav.size());
+
+    StandaloneAsrResponse standalone_asr;
+    if (!UploadStandaloneAsrAudio(self_test_wav, kSelfTestSpeechText, standalone_asr)) {
+        ESP_LOGE(TAG, "KIDS_ENGLISH_SELF_TEST_FAIL step=standalone_asr");
+        return false;
+    }
+    ESP_LOGI(TAG,
+             "KIDS_ENGLISH_SELF_TEST_STEP standalone_asr ok requestId=%s transcript=%s "
+             "asrDurationMs=%d totalDurationMs=%d",
+             standalone_asr.request_id.c_str(), standalone_asr.transcript.c_str(),
+             standalone_asr.asr_duration_ms, standalone_asr.total_duration_ms);
+
+    if (!StartConversation("manual")) {
+        ESP_LOGE(TAG, "KIDS_ENGLISH_SELF_TEST_FAIL step=start_conversation");
+        return false;
+    }
+    Application::GetInstance().GetAudioService().WaitForPlaybackQueueEmpty();
+
+    std::string conversation_id;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        conversation_id = conversation_id_;
+        channel_opened_ = true;
+    }
+    if (conversation_id.empty()) {
+        ESP_LOGE(TAG, "KIDS_ENGLISH_SELF_TEST_FAIL step=start_conversation reason=missing_id");
+        return false;
+    }
+    ESP_LOGI(TAG, "KIDS_ENGLISH_SELF_TEST_STEP start_conversation ok conversationId=%s",
+             conversation_id.c_str());
+
+    UploadResult upload = UploadPcmAudio(std::vector<int16_t>(self_test_pcm), conversation_id);
+    if (upload != UploadResult::kSuccess) {
+        ESP_LOGE(TAG, "KIDS_ENGLISH_SELF_TEST_FAIL step=upload_audio result=%d",
+                 static_cast<int>(upload));
+        return false;
+    }
+    Application::GetInstance().GetAudioService().WaitForPlaybackQueueEmpty();
+    ESP_LOGI(TAG, "KIDS_ENGLISH_SELF_TEST_STEP upload_audio ok conversationId=%s",
+             conversation_id.c_str());
+
+    if (!EndConversation(conversation_id)) {
+        ESP_LOGE(TAG, "KIDS_ENGLISH_SELF_TEST_FAIL step=end_conversation");
+        return false;
+    }
+    ESP_LOGI(TAG, "KIDS_ENGLISH_SELF_TEST_STEP end_conversation ok conversationId=%s",
+             conversation_id.c_str());
+
+    UploadResult ended_upload = UploadPcmAudio(std::move(self_test_pcm), conversation_id);
+    if (ended_upload != UploadResult::kConversationEnded) {
+        ESP_LOGE(TAG, "KIDS_ENGLISH_SELF_TEST_FAIL step=ended_upload expected=409 result=%d",
+                 static_cast<int>(ended_upload));
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        channel_opened_ = false;
+        pending_audio_.clear();
+        pending_pcm_.clear();
+        conversation_id_.clear();
+        session_id_.clear();
+    }
+    ESP_LOGI(TAG, "KIDS_ENGLISH_SELF_TEST_PASS conversationId=%s", conversation_id.c_str());
     return true;
 }
 
@@ -395,6 +515,31 @@ std::string KidsEnglishProtocol::BuildEndConversationBody(const char* reason) co
     return body;
 }
 
+std::string KidsEnglishProtocol::BuildStandaloneTtsBody(const std::string& text) const {
+    std::string body = "{";
+    body += "\"text\":" + JsonEscape(text);
+    body += "}";
+    return body;
+}
+
+std::string KidsEnglishProtocol::BuildStandaloneAsrMultipartBody(const std::string& boundary,
+                                                                 const std::string& wav,
+                                                                 const std::string& prompt_text) const {
+    std::string body;
+    body.reserve(boundary.size() * 4 + wav.size() + prompt_text.size() + 192);
+    if (!prompt_text.empty()) {
+        body += "--" + boundary + "\r\n";
+        body += "Content-Disposition: form-data; name=\"promptText\"\r\n\r\n";
+        body += prompt_text + "\r\n";
+    }
+    body += "--" + boundary + "\r\n";
+    body += "Content-Disposition: form-data; name=\"audio\"; filename=\"sample.wav\"\r\n";
+    body += "Content-Type: audio/wav\r\n\r\n";
+    body += wav;
+    body += "\r\n--" + boundary + "--\r\n";
+    return body;
+}
+
 std::string KidsEnglishProtocol::BuildMultipartAudioBody(const std::string& boundary,
                                                         const std::string& wav,
                                                         const std::string& client_turn_id,
@@ -465,8 +610,8 @@ void KidsEnglishProtocol::UpdateServerTimeOffset(const cJSON* server_time) {
         gettimeofday(&tv, nullptr);
         int64_t local_ms = static_cast<int64_t>(tv.tv_sec) * 1000 + tv.tv_usec / 1000;
         server_time_offset_ms_ = server_ms - local_ms;
-        ESP_LOGI(TAG, "Kids English server time offset: %lld ms",
-                 static_cast<long long>(server_time_offset_ms_));
+        ESP_LOGI(TAG, "Kids English server time offset: %d ms",
+                 static_cast<int>(server_time_offset_ms_));
     }
 }
 
@@ -625,6 +770,11 @@ bool KidsEnglishProtocol::UploadPendingAudio() {
         return false;
     }
 
+    return UploadPcmAudio(std::move(pcm), conversation_id) == UploadResult::kSuccess;
+}
+
+KidsEnglishProtocol::UploadResult KidsEnglishProtocol::UploadPcmAudio(
+    std::vector<int16_t>&& pcm, const std::string& conversation_id) {
     size_t pcm_bytes = pcm.size() * sizeof(int16_t);
     size_t wav_bytes = kWavHeaderBytes + pcm_bytes;
     int duration_ms = static_cast<int>((pcm.size() * 1000) / kPracticeAudioSampleRate);
@@ -639,14 +789,14 @@ bool KidsEnglishProtocol::UploadPendingAudio() {
     if (wav_bytes > kMaxPracticeAudioBytes) {
         ESP_LOGE(TAG, "Kids English WAV too large: %u bytes > %u bytes", (unsigned)wav_bytes,
                  (unsigned)kMaxPracticeAudioBytes);
-        return false;
+        return UploadResult::kFailed;
     }
 
     auto network = Board::GetInstance().GetNetwork();
     auto http = network->CreateHttp(3);
     if (http == nullptr) {
         ESP_LOGE(TAG, "Failed to create HTTP client");
-        return false;
+        return UploadResult::kFailed;
     }
 
     http->SetTimeout(kUploadTimeoutMs);
@@ -670,7 +820,7 @@ bool KidsEnglishProtocol::UploadPendingAudio() {
              kPracticeAudioBitsPerSample, url.c_str());
     if (!http->Open("POST", url)) {
         ESP_LOGE(TAG, "HTTP upload open failed, error=%d", http->GetLastError());
-        return false;
+        return UploadResult::kFailed;
     }
 
     int status = http->GetStatusCode();
@@ -679,24 +829,29 @@ bool KidsEnglishProtocol::UploadPendingAudio() {
     ESP_LOGI(TAG, "Kids English audio upload HTTP status=%d responseBytes=%u", status,
              (unsigned)response.size());
     if (status < 200 || status >= 300) {
-        ESP_LOGE(TAG, "Upload failed, status=%d, body=%s", status, response.c_str());
         cJSON* error_root = cJSON_Parse(response.c_str());
         if (status == 409 && IsConversationEndedError(error_root)) {
             std::lock_guard<std::mutex> lock(mutex_);
             conversation_id_.clear();
             session_id_.clear();
-            ESP_LOGW(TAG, "Conversation already ended; local conversation state cleared");
+            ESP_LOGW(TAG,
+                     "Conversation already ended after upload attempt; local conversation state cleared");
+            if (error_root != nullptr) {
+                cJSON_Delete(error_root);
+            }
+            return UploadResult::kConversationEnded;
         }
         if (error_root != nullptr) {
             cJSON_Delete(error_root);
         }
-        return false;
+        ESP_LOGE(TAG, "Upload failed, status=%d, body=%s", status, response.c_str());
+        return UploadResult::kFailed;
     }
 
     cJSON* root = cJSON_Parse(response.c_str());
     if (root == nullptr) {
         ESP_LOGE(TAG, "Failed to parse upload response: %s", response.c_str());
-        return false;
+        return UploadResult::kFailed;
     }
 
     auto ok = cJSON_GetObjectItem(root, "ok");
@@ -706,16 +861,18 @@ bool KidsEnglishProtocol::UploadPendingAudio() {
             std::lock_guard<std::mutex> lock(mutex_);
             conversation_id_.clear();
             session_id_.clear();
+            cJSON_Delete(root);
+            return UploadResult::kConversationEnded;
         }
         cJSON_Delete(root);
-        return false;
+        return UploadResult::kFailed;
     }
 
     ConversationResponse result;
     bool parsed = ParseConversationResponse(root, result);
     cJSON_Delete(root);
     if (!parsed) {
-        return false;
+        return UploadResult::kFailed;
     }
 
     ESP_LOGI(TAG,
@@ -726,7 +883,101 @@ bool KidsEnglishProtocol::UploadPendingAudio() {
              result.request_id.c_str(), (unsigned)pcm_bytes, status, result.asr_duration_ms,
              result.llm_duration_ms, result.tts_duration_ms, result.total_duration_ms);
     EmitSttMessage("Audio submitted.");
-    return HandleConversationResponse(result, "I heard you.");
+    return HandleConversationResponse(result, "I heard you.") ? UploadResult::kSuccess
+                                                              : UploadResult::kFailed;
+}
+
+bool KidsEnglishProtocol::RequestStandaloneTts(const std::string& text,
+                                               StandaloneTtsResponse& response) {
+    cJSON* root = nullptr;
+    std::string body = BuildStandaloneTtsBody(text);
+    if (!RequestJson("POST", "/api/device/tts", body, &root, kStandaloneSpeechTimeoutMs)) {
+        SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        return false;
+    }
+
+    bool parsed = ParseStandaloneTtsResponse(root, response);
+    cJSON_Delete(root);
+    if (!parsed) {
+        SetError(Lang::Strings::SERVER_ERROR);
+        return false;
+    }
+
+    ESP_LOGI(TAG,
+             "Standalone TTS result: requestId=%s format=%s ttsUrl=%s ttsDurationMs=%d "
+             "totalDurationMs=%d providerFallback=%s providerErrorCode=%s",
+             response.request_id.c_str(), response.audio_format.c_str(),
+             response.tts_audio_url.c_str(), response.tts_duration_ms, response.total_duration_ms,
+             response.provider_fallback ? "true" : "false", response.provider_error_code.c_str());
+    return true;
+}
+
+bool KidsEnglishProtocol::UploadStandaloneAsrAudio(const std::string& wav,
+                                                   const std::string& prompt_text,
+                                                   StandaloneAsrResponse& response) {
+    if (wav.empty() || wav.size() > kMaxPracticeAudioBytes) {
+        ESP_LOGE(TAG, "Standalone ASR WAV size invalid: %u bytes", (unsigned)wav.size());
+        return false;
+    }
+
+    auto network = Board::GetInstance().GetNetwork();
+    auto http = network->CreateHttp(3);
+    if (http == nullptr) {
+        ESP_LOGE(TAG, "Failed to create HTTP client");
+        return false;
+    }
+
+    const std::string path = "/api/device/asr";
+    std::string multipart_body = BuildStandaloneAsrMultipartBody(kMultipartBoundary, wav, prompt_text);
+
+    http->SetTimeout(kStandaloneSpeechTimeoutMs);
+    http->SetHeader("Accept", "application/json");
+    http->SetHeader("Content-Type", std::string("multipart/form-data; boundary=") + kMultipartBoundary);
+    AddDeviceAuthHeaders(http.get(), "POST", path, Sha256Hex(""));
+    http->SetContent(std::move(multipart_body));
+
+    auto url = BuildUrl(path.c_str());
+    ESP_LOGI(TAG, "Uploading standalone ASR audio: deviceId=%s wavBytes=%u prompt=%s url=%s",
+             device_id_.c_str(), (unsigned)wav.size(), prompt_text.c_str(), url.c_str());
+    if (!http->Open("POST", url)) {
+        ESP_LOGE(TAG, "Standalone ASR open failed, error=%d", http->GetLastError());
+        return false;
+    }
+
+    int status = http->GetStatusCode();
+    std::string body = http->ReadAll();
+    http->Close();
+    ESP_LOGI(TAG, "Standalone ASR HTTP status=%d responseBytes=%u", status, (unsigned)body.size());
+    if (status < 200 || status >= 300) {
+        ESP_LOGE(TAG, "Standalone ASR failed, status=%d, body=%s", status, body.c_str());
+        return false;
+    }
+
+    cJSON* root = cJSON_Parse(body.c_str());
+    if (root == nullptr) {
+        ESP_LOGE(TAG, "Failed to parse standalone ASR response: %s", body.c_str());
+        return false;
+    }
+
+    auto ok = cJSON_GetObjectItem(root, "ok");
+    if (!cJSON_IsTrue(ok)) {
+        ESP_LOGE(TAG, "Standalone ASR returned error: %s", GetErrorMessage(root).c_str());
+        cJSON_Delete(root);
+        return false;
+    }
+
+    bool parsed = ParseStandaloneAsrResponse(root, response);
+    cJSON_Delete(root);
+    if (!parsed) {
+        return false;
+    }
+
+    ESP_LOGI(TAG,
+             "Standalone ASR result: requestId=%s transcript=%s format=%s asrDurationMs=%d "
+             "totalDurationMs=%d",
+             response.request_id.c_str(), response.transcript.c_str(), response.audio_format.c_str(),
+             response.asr_duration_ms, response.total_duration_ms);
+    return true;
 }
 
 bool KidsEnglishProtocol::EndConversation(const std::string& conversation_id) {
@@ -759,6 +1010,8 @@ bool KidsEnglishProtocol::ParseConversationResponse(const cJSON* root, Conversat
     auto llm_duration_ms = cJSON_GetObjectItem(diagnostics, "llmDurationMs");
     auto tts_duration_ms = cJSON_GetObjectItem(diagnostics, "ttsDurationMs");
     auto total_duration_ms = cJSON_GetObjectItem(diagnostics, "totalDurationMs");
+    auto provider_fallback = cJSON_GetObjectItem(diagnostics, "providerFallback");
+    auto provider_error_code = cJSON_GetObjectItem(diagnostics, "providerErrorCode");
 
     if (!cJSON_IsString(conversation_id) || !cJSON_IsString(device_state) ||
         !cJSON_IsString(tts_audio_url)) {
@@ -777,6 +1030,58 @@ bool KidsEnglishProtocol::ParseConversationResponse(const cJSON* root, Conversat
     result.asr_duration_ms = JsonInt(asr_duration_ms);
     result.llm_duration_ms = JsonInt(llm_duration_ms);
     result.tts_duration_ms = JsonInt(tts_duration_ms);
+    result.total_duration_ms = JsonInt(total_duration_ms);
+    result.provider_fallback = JsonBool(provider_fallback);
+    result.provider_error_code = JsonString(provider_error_code);
+    return true;
+}
+
+bool KidsEnglishProtocol::ParseStandaloneTtsResponse(const cJSON* root,
+                                                     StandaloneTtsResponse& result) {
+    auto data = cJSON_GetObjectItem(root, "data");
+    auto tts_audio_url = cJSON_GetObjectItem(data, "ttsAudioUrl");
+    auto audio_format = cJSON_GetObjectItem(data, "audioFormat");
+    auto diagnostics = cJSON_GetObjectItem(data, "diagnostics");
+    auto request_id = cJSON_GetObjectItem(diagnostics, "requestId");
+    auto tts_duration_ms = cJSON_GetObjectItem(diagnostics, "ttsDurationMs");
+    auto total_duration_ms = cJSON_GetObjectItem(diagnostics, "totalDurationMs");
+    auto provider_fallback = cJSON_GetObjectItem(diagnostics, "providerFallback");
+    auto provider_error_code = cJSON_GetObjectItem(diagnostics, "providerErrorCode");
+
+    if (!cJSON_IsString(tts_audio_url)) {
+        ESP_LOGE(TAG, "Invalid standalone TTS response");
+        return false;
+    }
+
+    result.tts_audio_url = tts_audio_url->valuestring;
+    result.audio_format = JsonString(audio_format);
+    result.request_id = JsonString(request_id);
+    result.tts_duration_ms = JsonInt(tts_duration_ms);
+    result.total_duration_ms = JsonInt(total_duration_ms);
+    result.provider_fallback = JsonBool(provider_fallback);
+    result.provider_error_code = JsonString(provider_error_code);
+    return true;
+}
+
+bool KidsEnglishProtocol::ParseStandaloneAsrResponse(const cJSON* root,
+                                                     StandaloneAsrResponse& result) {
+    auto data = cJSON_GetObjectItem(root, "data");
+    auto transcript = cJSON_GetObjectItem(data, "transcript");
+    auto audio_format = cJSON_GetObjectItem(data, "audioFormat");
+    auto diagnostics = cJSON_GetObjectItem(data, "diagnostics");
+    auto request_id = cJSON_GetObjectItem(diagnostics, "requestId");
+    auto asr_duration_ms = cJSON_GetObjectItem(diagnostics, "asrDurationMs");
+    auto total_duration_ms = cJSON_GetObjectItem(diagnostics, "totalDurationMs");
+
+    if (!cJSON_IsString(transcript)) {
+        ESP_LOGE(TAG, "Invalid standalone ASR response");
+        return false;
+    }
+
+    result.transcript = transcript->valuestring;
+    result.audio_format = JsonString(audio_format);
+    result.request_id = JsonString(request_id);
+    result.asr_duration_ms = JsonInt(asr_duration_ms);
     result.total_duration_ms = JsonInt(total_duration_ms);
     return true;
 }
@@ -825,8 +1130,14 @@ bool KidsEnglishProtocol::ParseWavPcm16Mono(const std::string& wav, std::vector<
         uint32_t chunk_size = ReadLe32(chunk + 4);
         offset += 8;
         if (offset + chunk_size > wav.size()) {
-            ESP_LOGE(TAG, "Truncated WAV chunk");
-            return false;
+            if (std::memcmp(chunk, "data", 4) == 0) {
+                ESP_LOGW(TAG, "WAV data chunk size %u exceeds remaining %u; using remaining bytes",
+                         (unsigned)chunk_size, (unsigned)(wav.size() - offset));
+                chunk_size = wav.size() - offset;
+            } else {
+                ESP_LOGE(TAG, "Truncated WAV chunk");
+                return false;
+            }
         }
 
         if (std::memcmp(chunk, "fmt ", 4) == 0 && chunk_size >= 16) {
@@ -841,7 +1152,12 @@ bool KidsEnglishProtocol::ParseWavPcm16Mono(const std::string& wav, std::vector<
             found_data = true;
         }
 
-        offset += chunk_size + (chunk_size & 1);
+        size_t next_offset = offset + chunk_size + (chunk_size & 1);
+        if (next_offset <= offset) {
+            ESP_LOGE(TAG, "Invalid WAV chunk offset");
+            return false;
+        }
+        offset = next_offset;
     }
 
     if (!found_fmt || !found_data || audio_format != 1 || channels != 1 || bits_per_sample != 16 ||
@@ -856,7 +1172,8 @@ bool KidsEnglishProtocol::ParseWavPcm16Mono(const std::string& wav, std::vector<
     return true;
 }
 
-bool KidsEnglishProtocol::DownloadAndPlayTtsAudio(const std::string& url) {
+bool KidsEnglishProtocol::DownloadWavAudio(const std::string& url, std::vector<int16_t>& pcm,
+                                           int& sample_rate, std::string* content_type) {
     auto network = Board::GetInstance().GetNetwork();
     auto http = network->CreateHttp(3);
     if (http == nullptr) {
@@ -873,10 +1190,13 @@ bool KidsEnglishProtocol::DownloadAndPlayTtsAudio(const std::string& url) {
     }
 
     int status = http->GetStatusCode();
-    std::string content_type = http->GetResponseHeader("Content-Type");
+    std::string response_content_type = http->GetResponseHeader("Content-Type");
     std::string body;
     bool read_ok = ReadHttpBody(http.get(), body);
     http->Close();
+    if (content_type != nullptr) {
+        *content_type = response_content_type;
+    }
     if (status < 200 || status >= 300) {
         ESP_LOGE(TAG, "TTS download failed, status=%d, bytes=%u", status, (unsigned)body.size());
         return false;
@@ -886,15 +1206,24 @@ bool KidsEnglishProtocol::DownloadAndPlayTtsAudio(const std::string& url) {
         return false;
     }
 
-    std::vector<int16_t> pcm;
-    int sample_rate = 0;
     if (!ParseWavPcm16Mono(body, pcm, sample_rate)) {
-        ESP_LOGE(TAG, "TTS response is not playable WAV, content_type=%s", content_type.c_str());
+        ESP_LOGE(TAG, "TTS response is not playable WAV, content_type=%s",
+                 response_content_type.c_str());
         return false;
     }
 
     ESP_LOGI(TAG, "Downloaded TTS WAV: content_type=%s sample_rate=%d samples=%u",
-             content_type.c_str(), sample_rate, (unsigned)pcm.size());
+             response_content_type.c_str(), sample_rate, (unsigned)pcm.size());
+    return true;
+}
+
+bool KidsEnglishProtocol::DownloadAndPlayTtsAudio(const std::string& url) {
+    std::vector<int16_t> pcm;
+    int sample_rate = 0;
+    if (!DownloadWavAudio(url, pcm, sample_rate)) {
+        return false;
+    }
+
     AudioService& audio_service = Application::GetInstance().GetAudioService();
     audio_service.PushPcmToPlaybackQueue(std::move(pcm), sample_rate);
     return true;
@@ -927,13 +1256,15 @@ bool KidsEnglishProtocol::HandleConversationResponse(const ConversationResponse&
                                                      const char* fallback_text) {
     ESP_LOGI(TAG,
              "Conversation response: conversationId=%s turnId=%s state=%s cue=%s tts=%s "
-             "format=%s continue=%s requestId=%s asr=%d llm=%d ttsMs=%d total=%d",
+             "format=%s continue=%s requestId=%s asr=%d llm=%d ttsMs=%d total=%d "
+             "providerFallback=%s providerErrorCode=%s",
              response.conversation_id.c_str(), response.turn_id.c_str(),
              response.device_state.c_str(), response.screen_cue.c_str(),
              response.tts_audio_url.c_str(), response.audio_format.c_str(),
              response.should_continue_listening ? "true" : "false", response.request_id.c_str(),
              response.asr_duration_ms, response.llm_duration_ms, response.tts_duration_ms,
-             response.total_duration_ms);
+             response.total_duration_ms, response.provider_fallback ? "true" : "false",
+             response.provider_error_code.c_str());
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
