@@ -22,6 +22,7 @@ public:
     bool IsAudioChannelOpened() const override;
     bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) override;
     bool SendPcmAudio(std::vector<int16_t>&& pcm);
+    bool SendSimulatedRecording(const std::string& text);
     bool RunSelfTest();
     void SetNextConversationTrigger(const std::string& trigger);
     void SendStartListening(ListeningMode mode) override;

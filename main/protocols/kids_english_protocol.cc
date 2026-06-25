@@ -277,6 +277,83 @@ bool KidsEnglishProtocol::SendPcmAudio(std::vector<int16_t>&& pcm) {
     return true;
 }
 
+bool KidsEnglishProtocol::SendSimulatedRecording(const std::string& text) {
+    ESP_LOGI(TAG, "Simulating Kids English recording: %s", text.c_str());
+    error_occurred_ = false;
+    if (base_url_.empty()) {
+        SetError("Kids English server URL is empty");
+        return false;
+    }
+    if (!CheckHealth() || !DeviceHello()) {
+        ESP_LOGE(TAG, "Simulated recording failed during server/device check");
+        return false;
+    }
+
+    StandaloneTtsResponse tts;
+    if (!RequestStandaloneTts(text, tts)) {
+        ESP_LOGE(TAG, "Simulated recording failed at TTS step");
+        return false;
+    }
+
+    std::vector<int16_t> pcm;
+    int sample_rate = 0;
+    if (!DownloadWavAudio(tts.tts_audio_url, pcm, sample_rate)) {
+        ESP_LOGE(TAG, "Simulated recording failed to download generated speech");
+        SetError(Lang::Strings::SERVER_ERROR);
+        return false;
+    }
+    if (sample_rate != kPracticeAudioSampleRate) {
+        ESP_LOGE(TAG, "Simulated recording sample rate mismatch: %d", sample_rate);
+        SetError(Lang::Strings::SERVER_ERROR);
+        return false;
+    }
+
+    bool opened_here = false;
+    std::string conversation_id;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        conversation_id = conversation_id_;
+    }
+    if (conversation_id.empty() || !IsAudioChannelOpened()) {
+        if (!StartConversation("touch")) {
+            ESP_LOGE(TAG, "Simulated recording failed to start conversation");
+            return false;
+        }
+        opened_here = true;
+        Application::GetInstance().GetAudioService().WaitForPlaybackQueueEmpty();
+        std::lock_guard<std::mutex> lock(mutex_);
+        conversation_id = conversation_id_;
+        channel_opened_ = true;
+    }
+
+    if (conversation_id.empty()) {
+        ESP_LOGE(TAG, "Simulated recording missing conversation id");
+        SetError(Lang::Strings::SERVER_ERROR);
+        return false;
+    }
+
+    UploadResult upload = UploadPcmAudio(std::move(pcm), conversation_id);
+    bool ok = upload == UploadResult::kSuccess;
+    if (!ok) {
+        ESP_LOGE(TAG, "Simulated recording upload failed: result=%d", static_cast<int>(upload));
+        SetError(Lang::Strings::SERVER_ERROR);
+    }
+
+    Application::GetInstance().GetAudioService().WaitForPlaybackQueueEmpty();
+    if (opened_here) {
+        if (ok) {
+            EndConversation(conversation_id);
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        channel_opened_ = false;
+        pending_audio_.clear();
+        pending_pcm_.clear();
+        conversation_id_.clear();
+        session_id_.clear();
+    }
+    return ok;
+}
+
 bool KidsEnglishProtocol::RunSelfTest() {
     ESP_LOGI(TAG, "KIDS_ENGLISH_SELF_TEST_BEGIN baseUrl=%s deviceId=%s", base_url_.c_str(),
              device_id_.c_str());

@@ -116,6 +116,7 @@ public:
     AudioService& GetAudioService() { return audio_service_; }
     void ShowDebugInfo();
     void ClearDebugMessages();
+    void SendSimulatedRecording(const std::string& text);
     
     /**
      * Reset protocol resources (thread-safe)
@@ -149,6 +150,7 @@ private:
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
     TaskHandle_t kids_english_self_test_task_handle_ = nullptr;
+    TaskHandle_t kids_english_simulated_recording_task_handle_ = nullptr;
 
 
     // Event handlers
@@ -165,6 +167,7 @@ private:
     void SubmitKidsEnglishRecording();
     void MaybeStartKidsEnglishSelfTest();
     void KidsEnglishSelfTestTask();
+    void KidsEnglishSimulatedRecordingTask(std::string text);
 
     // Activation task (runs in background)
     void ActivationTask();

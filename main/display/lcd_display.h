@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <memory>
+#include <string>
 
 #define PREVIEW_IMAGE_DURATION_MS 5000
 
@@ -28,6 +29,10 @@ protected:
     lv_obj_t* bottom_bar_ = nullptr;
     lv_obj_t* debug_button_ = nullptr;
     lv_obj_t* debug_menu_ = nullptr;
+    lv_obj_t* debug_title_label_ = nullptr;
+    lv_obj_t* debug_content_ = nullptr;
+    lv_obj_t* debug_back_button_ = nullptr;
+    lv_obj_t* debug_close_button_ = nullptr;
     lv_obj_t* preview_image_ = nullptr;
     lv_obj_t* emoji_label_ = nullptr;
     lv_obj_t* emoji_image_ = nullptr;
@@ -38,10 +43,25 @@ protected:
     std::unique_ptr<LvglImage> preview_image_cached_ = nullptr;
     bool hide_subtitle_ = false;  // Control whether to hide chat messages/subtitles
 
+    enum class DebugMenuView {
+        kHome,
+        kDeviceInfo,
+        kSimulatedRecording,
+    };
+    DebugMenuView debug_menu_view_ = DebugMenuView::kHome;
+
     void InitializeLcdThemes();
     void CreateDebugEntry();
     void ToggleDebugMenu();
     void HideDebugMenu();
+    void SetDebugMenuView(DebugMenuView view);
+    void RenderDebugMenu();
+    void RenderDebugHome();
+    void RenderDebugDeviceInfo();
+    void RenderDebugSimulatedRecordings();
+    lv_obj_t* CreateDebugAction(lv_obj_t* parent, const char* icon_text, const char* label_text,
+                                void (*handler)(lv_event_t*), void* user_data = nullptr);
+    void AddDebugInfoRow(lv_obj_t* parent, const char* label, const std::string& value);
     virtual bool Lock(int timeout_ms = 0) override;
     virtual void Unlock() override;
 

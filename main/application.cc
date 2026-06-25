@@ -731,6 +731,32 @@ void Application::ClearDebugMessages() {
     });
 }
 
+void Application::SendSimulatedRecording(const std::string& text) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (kids_english_simulated_recording_task_handle_ != nullptr) {
+        Board::GetInstance().GetDisplay()->ShowNotification("模拟录音进行中");
+        return;
+    }
+
+    auto task_text = new std::string(text);
+    BaseType_t created = xTaskCreate([](void* arg) {
+        std::unique_ptr<std::string> text(static_cast<std::string*>(arg));
+        auto& app = Application::GetInstance();
+        app.KidsEnglishSimulatedRecordingTask(*text);
+        app.kids_english_simulated_recording_task_handle_ = nullptr;
+        vTaskDelete(NULL);
+    }, "kids_sim_record", 4096 * 2, task_text, 3,
+       &kids_english_simulated_recording_task_handle_);
+    if (created != pdPASS) {
+        delete task_text;
+        kids_english_simulated_recording_task_handle_ = nullptr;
+        Board::GetInstance().GetDisplay()->ShowNotification("模拟录音启动失败");
+    }
+#else
+    (void)text;
+#endif
+}
+
 void Application::HandleToggleChatEvent() {
     auto state = GetDeviceState();
     
@@ -1005,6 +1031,33 @@ void Application::KidsEnglishSelfTestTask() {
                                                  : "Kids English self-test failed");
         SetDeviceState(kDeviceStateIdle);
     });
+#endif
+}
+
+void Application::KidsEnglishSimulatedRecordingTask(std::string text) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    Schedule([text]() {
+        auto display = Board::GetInstance().GetDisplay();
+        display->ShowNotification("发送模拟录音", 2000);
+        display->SetChatMessage("user", text.c_str());
+    });
+
+    bool ok = false;
+    if (protocol_ == nullptr) {
+        ESP_LOGE(TAG, "Simulated recording failed: protocol not initialized");
+    } else {
+        ok = static_cast<KidsEnglishProtocol*>(protocol_.get())->SendSimulatedRecording(text);
+    }
+
+    Schedule([ok]() {
+        auto display = Board::GetInstance().GetDisplay();
+        display->ShowNotification(ok ? "模拟录音已发送" : "模拟录音失败", 3000);
+        if (!ok) {
+            display->SetChatMessage("system", "Simulated recording failed");
+        }
+    });
+#else
+    (void)text;
 #endif
 }
 

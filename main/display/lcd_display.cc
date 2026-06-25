@@ -4,6 +4,7 @@
 #include "lvgl_theme.h"
 #include "assets/lang_config.h"
 #include "application.h"
+#include "system_info.h"
 
 #include <vector>
 #include <algorithm>
@@ -14,6 +15,7 @@
 #include <esp_psram.h>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 #include <src/misc/cache/lv_cache.h>
 
 #include "board.h"
@@ -21,15 +23,22 @@
 #define TAG "LcdDisplay"
 
 namespace {
-enum class DebugMenuAction {
-    kTogglePractice = 1,
-    kShowInfo,
-    kClearMessages,
+struct DebugPhrase {
+    const char* title;
+    const char* text;
+};
+
+constexpr DebugPhrase kDebugPhrases[] = {
+    {"I like apples.", "I like apples."},
+    {"My name is Tom.", "My name is Tom."},
+    {"I am seven years old.", "I am seven years old."},
+    {"Can I have some water?", "Can I have some water?"},
 };
 }  // namespace
 
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
+LV_FONT_DECLARE(font_puhui_14_1);
 LV_FONT_DECLARE(font_awesome_30_4);
 
 #ifndef DISPLAY_ROUND_SAFE_STATUS_BAR
@@ -334,6 +343,10 @@ LcdDisplay::~LcdDisplay() {
     }
     if (debug_menu_ != nullptr) {
         lv_obj_del(debug_menu_);
+        debug_title_label_ = nullptr;
+        debug_content_ = nullptr;
+        debug_back_button_ = nullptr;
+        debug_close_button_ = nullptr;
     }
     if (debug_button_ != nullptr) {
         lv_obj_del(debug_button_);
@@ -370,6 +383,91 @@ void LcdDisplay::Unlock() {
     lvgl_port_unlock();
 }
 
+lv_obj_t* LcdDisplay::CreateDebugAction(lv_obj_t* parent, const char* icon_text,
+                                         const char* label_text,
+                                         void (*handler)(lv_event_t*),
+                                         void* user_data) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+    auto icon_font = lvgl_theme->icon_font()->font();
+
+    auto button = lv_button_create(parent);
+    lv_obj_set_width(button, LV_PCT(100));
+    lv_obj_set_height(button, LV_SIZE_CONTENT);
+    lv_obj_set_style_min_height(button, 38, 0);
+    lv_obj_set_style_radius(button, 7, 0);
+    lv_obj_set_style_bg_color(button, lvgl_theme->chat_background_color(), 0);
+    lv_obj_set_style_bg_opa(button, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(button, 0, 0);
+    lv_obj_set_style_pad_left(button, lvgl_theme->spacing(4), 0);
+    lv_obj_set_style_pad_right(button, lvgl_theme->spacing(4), 0);
+    lv_obj_set_style_pad_top(button, lvgl_theme->spacing(3), 0);
+    lv_obj_set_style_pad_bottom(button, lvgl_theme->spacing(3), 0);
+    lv_obj_set_style_pad_column(button, lvgl_theme->spacing(3), 0);
+    lv_obj_set_flex_flow(button, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(button, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollbar_mode(button, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_user_data(button, this);
+
+    auto icon_label = lv_label_create(button);
+    lv_label_set_text(icon_label, icon_text);
+    lv_obj_set_style_text_font(icon_label, icon_font, 0);
+    lv_obj_set_style_text_color(icon_label, lvgl_theme->text_color(), 0);
+
+    auto text_label = lv_label_create(button);
+    lv_label_set_text(text_label, label_text);
+    lv_label_set_long_mode(text_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(text_label, &font_puhui_14_1, 0);
+    lv_obj_set_style_text_color(text_label, lvgl_theme->text_color(), 0);
+    lv_obj_set_flex_grow(text_label, 1);
+
+    lv_obj_add_event_cb(button, handler, LV_EVENT_CLICKED, user_data);
+    return button;
+#else
+    (void)parent;
+    (void)icon_text;
+    (void)label_text;
+    (void)handler;
+    (void)user_data;
+    return nullptr;
+#endif
+}
+
+void LcdDisplay::AddDebugInfoRow(lv_obj_t* parent, const char* label, const std::string& value) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+
+    auto row = lv_obj_create(parent);
+    lv_obj_set_width(row, LV_PCT(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_set_style_radius(row, 6, 0);
+    lv_obj_set_style_bg_color(row, lvgl_theme->chat_background_color(), 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, lvgl_theme->spacing(3), 0);
+    lv_obj_set_style_pad_row(row, lvgl_theme->spacing(1), 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scrollbar_mode(row, LV_SCROLLBAR_MODE_OFF);
+
+    auto label_obj = lv_label_create(row);
+    lv_label_set_text(label_obj, label);
+    lv_obj_set_style_text_font(label_obj, &font_puhui_14_1, 0);
+    lv_obj_set_style_text_color(label_obj, lv_color_hex(0x8A8A8A), 0);
+
+    auto value_obj = lv_label_create(row);
+    lv_label_set_text(value_obj, value.c_str());
+    lv_label_set_long_mode(value_obj, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(value_obj, LV_PCT(100));
+    lv_obj_set_style_text_font(value_obj, &font_puhui_14_1, 0);
+    lv_obj_set_style_text_color(value_obj, lvgl_theme->text_color(), 0);
+#else
+    (void)parent;
+    (void)label;
+    (void)value;
+#endif
+}
+
 void LcdDisplay::CreateDebugEntry() {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
     if (debug_button_ != nullptr) {
@@ -378,7 +476,6 @@ void LcdDisplay::CreateDebugEntry() {
 
     auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
     auto icon_font = lvgl_theme->icon_font()->font();
-    auto text_font = lvgl_theme->text_font()->font();
     auto screen = lv_screen_active();
 
     debug_button_ = lv_button_create(screen);
@@ -398,77 +495,205 @@ void LcdDisplay::CreateDebugEntry() {
     lv_obj_center(icon);
 
     debug_menu_ = lv_obj_create(screen);
-    lv_obj_set_size(debug_menu_, 180, LV_SIZE_CONTENT);
-    lv_obj_align(debug_menu_, LV_ALIGN_RIGHT_MID, -64, -22);
-    lv_obj_set_style_radius(debug_menu_, 8, 0);
+    int panel_width = DISPLAY_ROUND_SAFE_STATUS_BAR ? LV_HOR_RES * 82 / 100 : LV_HOR_RES * 92 / 100;
+    int panel_height = DISPLAY_ROUND_SAFE_STATUS_BAR ? LV_VER_RES * 82 / 100 : LV_VER_RES * 90 / 100;
+    lv_obj_set_size(debug_menu_, panel_width, panel_height);
+    lv_obj_center(debug_menu_);
+    lv_obj_set_style_radius(debug_menu_, 18, 0);
     lv_obj_set_style_bg_color(debug_menu_, lvgl_theme->background_color(), 0);
     lv_obj_set_style_bg_opa(debug_menu_, LV_OPA_90, 0);
     lv_obj_set_style_border_width(debug_menu_, 1, 0);
     lv_obj_set_style_border_color(debug_menu_, lvgl_theme->border_color(), 0);
-    lv_obj_set_style_pad_all(debug_menu_, lvgl_theme->spacing(2), 0);
-    lv_obj_set_style_pad_row(debug_menu_, lvgl_theme->spacing(1), 0);
+    lv_obj_set_style_pad_all(debug_menu_, lvgl_theme->spacing(4), 0);
+    lv_obj_set_style_pad_row(debug_menu_, lvgl_theme->spacing(2), 0);
     lv_obj_set_flex_flow(debug_menu_, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scrollbar_mode(debug_menu_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_text_font(debug_menu_, &font_puhui_14_1, 0);
+    lv_obj_set_user_data(debug_menu_, this);
     lv_obj_add_flag(debug_menu_, LV_OBJ_FLAG_HIDDEN);
 
-    auto create_action = [this, text_font, icon_font, lvgl_theme](const char* icon_text,
-                                                                  const char* label_text,
-                                                                  DebugMenuAction action) {
-        auto button = lv_button_create(debug_menu_);
-        lv_obj_set_width(button, LV_PCT(100));
-        lv_obj_set_height(button, 38);
-        lv_obj_set_style_radius(button, 6, 0);
-        lv_obj_set_style_bg_color(button, lvgl_theme->chat_background_color(), 0);
-        lv_obj_set_style_bg_opa(button, LV_OPA_70, 0);
-        lv_obj_set_style_border_width(button, 0, 0);
-        lv_obj_set_style_pad_left(button, lvgl_theme->spacing(3), 0);
-        lv_obj_set_style_pad_right(button, lvgl_theme->spacing(3), 0);
-        lv_obj_set_flex_flow(button, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(button, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
-                              LV_FLEX_ALIGN_CENTER);
+    auto header = lv_obj_create(debug_menu_);
+    lv_obj_set_width(header, LV_PCT(100));
+    lv_obj_set_height(header, 34);
+    lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(header, 0, 0);
+    lv_obj_set_style_pad_all(header, 0, 0);
+    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollbar_mode(header, LV_SCROLLBAR_MODE_OFF);
 
-        auto icon_label = lv_label_create(button);
-        lv_label_set_text(icon_label, icon_text);
-        lv_obj_set_style_text_font(icon_label, icon_font, 0);
-        lv_obj_set_style_text_color(icon_label, lvgl_theme->text_color(), 0);
+    debug_back_button_ = lv_button_create(header);
+    lv_obj_set_size(debug_back_button_, 30, 30);
+    lv_obj_set_style_radius(debug_back_button_, 15, 0);
+    lv_obj_set_style_bg_opa(debug_back_button_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(debug_back_button_, 0, 0);
+    lv_obj_set_style_pad_all(debug_back_button_, 0, 0);
+    lv_obj_set_user_data(debug_back_button_, this);
+    auto back_icon = lv_label_create(debug_back_button_);
+    lv_label_set_text(back_icon, FONT_AWESOME_ARROW_LEFT);
+    lv_obj_set_style_text_font(back_icon, icon_font, 0);
+    lv_obj_set_style_text_color(back_icon, lvgl_theme->text_color(), 0);
+    lv_obj_center(back_icon);
+    lv_obj_add_event_cb(debug_back_button_, [](lv_event_t* e) {
+        auto target = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+        auto display = static_cast<LcdDisplay*>(lv_obj_get_user_data(target));
+        if (display != nullptr) {
+            display->SetDebugMenuView(DebugMenuView::kHome);
+        }
+    }, LV_EVENT_CLICKED, nullptr);
 
-        auto text_label = lv_label_create(button);
-        lv_label_set_text(text_label, label_text);
-        lv_obj_set_style_text_font(text_label, text_font, 0);
-        lv_obj_set_style_text_color(text_label, lvgl_theme->text_color(), 0);
-        lv_obj_set_style_margin_left(text_label, lvgl_theme->spacing(2), 0);
+    debug_title_label_ = lv_label_create(header);
+    lv_label_set_long_mode(debug_title_label_, LV_LABEL_LONG_DOT);
+    lv_obj_set_flex_grow(debug_title_label_, 1);
+    lv_obj_set_style_text_font(debug_title_label_, &font_puhui_14_1, 0);
+    lv_obj_set_style_text_color(debug_title_label_, lvgl_theme->text_color(), 0);
+    lv_obj_set_style_text_align(debug_title_label_, LV_TEXT_ALIGN_CENTER, 0);
 
-        lv_obj_add_event_cb(button, [](lv_event_t* e) {
-            auto action = static_cast<DebugMenuAction>(
-                reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
-            switch (action) {
-                case DebugMenuAction::kTogglePractice:
-                    Application::GetInstance().ToggleChatState();
-                    break;
-                case DebugMenuAction::kShowInfo:
-                    Application::GetInstance().ShowDebugInfo();
-                    break;
-                case DebugMenuAction::kClearMessages:
-                    Application::GetInstance().ClearDebugMessages();
-                    break;
-            }
-            auto target = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-            auto display = static_cast<LcdDisplay*>(lv_obj_get_user_data(target));
-            if (display != nullptr) {
-                display->HideDebugMenu();
-            }
-        }, LV_EVENT_CLICKED, reinterpret_cast<void*>(static_cast<intptr_t>(action)));
-        lv_obj_set_user_data(button, this);
-    };
+    debug_close_button_ = lv_button_create(header);
+    lv_obj_set_size(debug_close_button_, 30, 30);
+    lv_obj_set_style_radius(debug_close_button_, 15, 0);
+    lv_obj_set_style_bg_opa(debug_close_button_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(debug_close_button_, 0, 0);
+    lv_obj_set_style_pad_all(debug_close_button_, 0, 0);
+    lv_obj_set_user_data(debug_close_button_, this);
+    auto close_icon = lv_label_create(debug_close_button_);
+    lv_label_set_text(close_icon, FONT_AWESOME_XMARK);
+    lv_obj_set_style_text_font(close_icon, icon_font, 0);
+    lv_obj_set_style_text_color(close_icon, lvgl_theme->text_color(), 0);
+    lv_obj_center(close_icon);
+    lv_obj_add_event_cb(debug_close_button_, [](lv_event_t* e) {
+        auto target = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+        auto display = static_cast<LcdDisplay*>(lv_obj_get_user_data(target));
+        if (display != nullptr) {
+            display->HideDebugMenu();
+        }
+    }, LV_EVENT_CLICKED, nullptr);
 
-    create_action(FONT_AWESOME_MICROPHONE, "开始/提交练习", DebugMenuAction::kTogglePractice);
-    create_action(FONT_AWESOME_CIRCLE_INFO, "设备信息", DebugMenuAction::kShowInfo);
-    create_action(FONT_AWESOME_TRASH, "清空消息", DebugMenuAction::kClearMessages);
+    debug_content_ = lv_obj_create(debug_menu_);
+    lv_obj_set_width(debug_content_, LV_PCT(100));
+    lv_obj_set_flex_grow(debug_content_, 1);
+    lv_obj_set_style_bg_opa(debug_content_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(debug_content_, 0, 0);
+    lv_obj_set_style_pad_all(debug_content_, 0, 0);
+    lv_obj_set_style_pad_row(debug_content_, lvgl_theme->spacing(2), 0);
+    lv_obj_set_flex_flow(debug_content_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scroll_dir(debug_content_, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(debug_content_, LV_SCROLLBAR_MODE_AUTO);
+
+    RenderDebugMenu();
 
     lv_obj_add_event_cb(debug_button_, [](lv_event_t* e) {
         auto display = static_cast<LcdDisplay*>(lv_event_get_user_data(e));
         display->ToggleDebugMenu();
     }, LV_EVENT_CLICKED, this);
+#endif
+}
+
+void LcdDisplay::SetDebugMenuView(DebugMenuView view) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    debug_menu_view_ = view;
+    RenderDebugMenu();
+#else
+    (void)view;
+#endif
+}
+
+void LcdDisplay::RenderDebugMenu() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (debug_content_ == nullptr || debug_title_label_ == nullptr) {
+        return;
+    }
+    lv_obj_clean(debug_content_);
+
+    switch (debug_menu_view_) {
+        case DebugMenuView::kHome:
+            lv_label_set_text(debug_title_label_, "调试菜单");
+            lv_obj_add_flag(debug_back_button_, LV_OBJ_FLAG_HIDDEN);
+            RenderDebugHome();
+            break;
+        case DebugMenuView::kDeviceInfo:
+            lv_label_set_text(debug_title_label_, "设备信息");
+            lv_obj_remove_flag(debug_back_button_, LV_OBJ_FLAG_HIDDEN);
+            RenderDebugDeviceInfo();
+            break;
+        case DebugMenuView::kSimulatedRecording:
+            lv_label_set_text(debug_title_label_, "模拟录音");
+            lv_obj_remove_flag(debug_back_button_, LV_OBJ_FLAG_HIDDEN);
+            RenderDebugSimulatedRecordings();
+            break;
+    }
+#endif
+}
+
+void LcdDisplay::RenderDebugHome() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    CreateDebugAction(debug_content_, FONT_AWESOME_MICROPHONE, "开始/提交练习", [](lv_event_t*) {
+        Application::GetInstance().ToggleChatState();
+    });
+    CreateDebugAction(debug_content_, FONT_AWESOME_CIRCLE_INFO, "设备信息", [](lv_event_t* e) {
+        auto target = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+        auto display = static_cast<LcdDisplay*>(lv_obj_get_user_data(target));
+        if (display != nullptr) {
+            display->SetDebugMenuView(DebugMenuView::kDeviceInfo);
+        }
+    });
+    CreateDebugAction(debug_content_, FONT_AWESOME_PLAY, "模拟录音", [](lv_event_t* e) {
+        auto target = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+        auto display = static_cast<LcdDisplay*>(lv_obj_get_user_data(target));
+        if (display != nullptr) {
+            display->SetDebugMenuView(DebugMenuView::kSimulatedRecording);
+        }
+    });
+    CreateDebugAction(debug_content_, FONT_AWESOME_TRASH, "清空消息", [](lv_event_t*) {
+        Application::GetInstance().ClearDebugMessages();
+    });
+#endif
+}
+
+void LcdDisplay::RenderDebugDeviceInfo() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    auto& board = Board::GetInstance();
+    auto& app = Application::GetInstance();
+
+    int battery_level = 0;
+    bool charging = false;
+    bool discharging = false;
+    float voltage = 0.0f;
+    bool has_battery = board.GetBatteryLevel(battery_level, charging, discharging);
+    bool has_voltage = board.GetBatteryVoltage(voltage);
+
+    AddDebugInfoRow(debug_content_, "Board", BOARD_NAME);
+    AddDebugInfoRow(debug_content_, "State", std::to_string(static_cast<int>(app.GetDeviceState())));
+    AddDebugInfoRow(debug_content_, "Heap", std::to_string(SystemInfo::GetFreeHeapSize()));
+    AddDebugInfoRow(debug_content_, "UUID", board.GetUuid());
+
+    if (!has_battery) {
+        AddDebugInfoRow(debug_content_, "Battery", "n/a");
+    } else {
+        char battery_text[64];
+        if (has_voltage) {
+            snprintf(battery_text, sizeof(battery_text), "%d%% %.2fV %s%s", battery_level, voltage,
+                     charging ? "charging" : "", discharging ? "discharging" : "");
+        } else {
+            snprintf(battery_text, sizeof(battery_text), "%d%%", battery_level);
+        }
+        AddDebugInfoRow(debug_content_, "Battery", battery_text);
+    }
+    AddDebugInfoRow(debug_content_, "Firmware", SystemInfo::GetUserAgent());
+#endif
+}
+
+void LcdDisplay::RenderDebugSimulatedRecordings() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    for (const auto& phrase : kDebugPhrases) {
+        CreateDebugAction(debug_content_, FONT_AWESOME_MICROPHONE, phrase.title, [](lv_event_t* e) {
+            auto phrase = static_cast<const DebugPhrase*>(lv_event_get_user_data(e));
+            if (phrase != nullptr) {
+                Application::GetInstance().SendSimulatedRecording(phrase->text);
+            }
+        }, const_cast<DebugPhrase*>(&phrase));
+    }
 #endif
 }
 
@@ -478,6 +703,7 @@ void LcdDisplay::ToggleDebugMenu() {
         return;
     }
     if (lv_obj_has_flag(debug_menu_, LV_OBJ_FLAG_HIDDEN)) {
+        SetDebugMenuView(DebugMenuView::kHome);
         lv_obj_remove_flag(debug_menu_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(debug_menu_);
         lv_obj_move_foreground(debug_button_);
