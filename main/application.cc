@@ -21,6 +21,14 @@
 
 #define TAG "Application"
 
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+namespace {
+constexpr int64_t kKidsEnglishInitialSilenceTimeoutMs = 7000;
+constexpr int64_t kKidsEnglishEndSilenceTimeoutMs = 1200;
+constexpr int64_t kKidsEnglishMaxRecordingDurationMs = 10000;
+}  // namespace
+#endif
+
 
 Application::Application() {
     event_group_ = xEventGroupCreate();
@@ -83,6 +91,11 @@ void Application::Initialize() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_WAKE_WORD_DETECTED);
     };
     callbacks.on_vad_change = [this](bool speaking) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+        Schedule([this, speaking]() {
+            HandleKidsEnglishVadChange(speaking);
+        });
+#endif
         xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
     };
     audio_service_.SetCallbacks(callbacks);
@@ -251,6 +264,9 @@ void Application::Run() {
             clock_ticks_++;
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+            CheckKidsEnglishRecordingAutoStop();
+#endif
         
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
@@ -974,6 +990,8 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
 
 void Application::SubmitKidsEnglishRecording() {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
+    StopKidsEnglishRecordingDetection();
+
     if (kids_english_submit_recording_task_handle_ != nullptr) {
         ESP_LOGW(TAG, "Kids English recording submission already running");
         Board::GetInstance().GetDisplay()->ShowNotification("录音提交中");
@@ -991,10 +1009,7 @@ void Application::SubmitKidsEnglishRecording() {
 
     if (pcm.empty()) {
         ESP_LOGW(TAG, "No Kids English PCM recording captured");
-        if (protocol_) {
-            protocol_->SendStopListening();
-        }
-        SetDeviceState(kDeviceStateIdle);
+        CancelKidsEnglishRecording("empty_pcm");
         return;
     }
 
@@ -1002,8 +1017,28 @@ void Application::SubmitKidsEnglishRecording() {
 #endif
 }
 
+void Application::CancelKidsEnglishRecording(const char* reason) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    ESP_LOGI(TAG, "Canceling Kids English recording: %s", reason);
+    StopKidsEnglishRecordingDetection();
+    audio_service_.EnableVoiceProcessing(false);
+    audio_service_.EndPcmCapture();
+    while (audio_service_.PopPacketFromSendQueue()) {
+    }
+    if (protocol_ != nullptr && protocol_->IsAudioChannelOpened()) {
+        protocol_->CloseAudioChannel(false);
+    } else {
+        SetDeviceState(kDeviceStateIdle);
+    }
+#else
+    (void)reason;
+#endif
+}
+
 bool Application::StartKidsEnglishRecordingSubmission(std::vector<int16_t>&& pcm, const char* source) {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
+    StopKidsEnglishRecordingDetection();
+
     if (kids_english_submit_recording_task_handle_ != nullptr) {
         ESP_LOGW(TAG, "Kids English recording submission already running");
         Board::GetInstance().GetDisplay()->ShowNotification("录音提交中");
@@ -1071,6 +1106,83 @@ void Application::KidsEnglishSubmitRecordingTask(std::vector<int16_t> pcm) {
     }
 #else
     (void)pcm;
+#endif
+}
+
+void Application::StartKidsEnglishRecordingDetection() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    kids_english_recording_detector_active_ = true;
+    kids_english_recording_has_voice_ = false;
+    kids_english_recording_started_at_ms_ = now_ms;
+    kids_english_recording_silence_started_at_ms_ = now_ms;
+    ESP_LOGI(TAG, "Kids English recording detector started");
+#endif
+}
+
+void Application::StopKidsEnglishRecordingDetection() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (!kids_english_recording_detector_active_) {
+        return;
+    }
+    kids_english_recording_detector_active_ = false;
+    kids_english_recording_has_voice_ = false;
+    kids_english_recording_started_at_ms_ = 0;
+    kids_english_recording_silence_started_at_ms_ = 0;
+    ESP_LOGI(TAG, "Kids English recording detector stopped");
+#endif
+}
+
+void Application::HandleKidsEnglishVadChange(bool speaking) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (!kids_english_recording_detector_active_ || GetDeviceState() != kDeviceStateListening) {
+        return;
+    }
+
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    if (speaking) {
+        if (!kids_english_recording_has_voice_) {
+            ESP_LOGI(TAG, "Kids English recording detected speech");
+        }
+        kids_english_recording_has_voice_ = true;
+        kids_english_recording_silence_started_at_ms_ = 0;
+    } else {
+        kids_english_recording_silence_started_at_ms_ = now_ms;
+        ESP_LOGI(TAG, "Kids English recording detected silence");
+    }
+#else
+    (void)speaking;
+#endif
+}
+
+void Application::CheckKidsEnglishRecordingAutoStop() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (!kids_english_recording_detector_active_ || GetDeviceState() != kDeviceStateListening) {
+        return;
+    }
+
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    int64_t recording_ms = now_ms - kids_english_recording_started_at_ms_;
+    if (!kids_english_recording_has_voice_) {
+        if (recording_ms >= kKidsEnglishInitialSilenceTimeoutMs) {
+            ESP_LOGW(TAG, "Kids English recording timed out waiting for speech");
+            Board::GetInstance().GetDisplay()->ShowNotification("未检测到语音", 2000);
+            CancelKidsEnglishRecording("initial_silence_timeout");
+        }
+        return;
+    }
+
+    bool silence_timeout =
+        kids_english_recording_silence_started_at_ms_ > 0 &&
+        now_ms - kids_english_recording_silence_started_at_ms_ >= kKidsEnglishEndSilenceTimeoutMs;
+    bool max_duration_timeout = recording_ms >= kKidsEnglishMaxRecordingDurationMs;
+    if (!silence_timeout && !max_duration_timeout) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Kids English recording auto stop: silence=%d maxDuration=%d durationMs=%lld",
+             silence_timeout, max_duration_timeout, static_cast<long long>(recording_ms));
+    SubmitKidsEnglishRecording();
 #endif
 }
 
@@ -1185,6 +1297,9 @@ void Application::HandleStateChangedEvent() {
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+            StopKidsEnglishRecordingDetection();
+#endif
             display->SetStatus(Lang::Strings::STANDBY);
             display->ClearChatMessages();  // Clear messages first
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
@@ -1215,6 +1330,11 @@ void Application::HandleStateChangedEvent() {
                 audio_service_.BeginPcmCapture();
 #endif
                 audio_service_.EnableVoiceProcessing(true);
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+                if (listening_mode_ == kListeningModeAutoStop) {
+                    StartKidsEnglishRecordingDetection();
+                }
+#endif
             }
 
 #ifdef CONFIG_WAKE_WORD_DETECTION_IN_LISTENING
@@ -1232,6 +1352,9 @@ void Application::HandleStateChangedEvent() {
             }
             break;
         case kDeviceStateSpeaking:
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+            StopKidsEnglishRecordingDetection();
+#endif
             display->SetStatus(Lang::Strings::SPEAKING);
 
             if (listening_mode_ != kListeningModeRealtime) {
@@ -1244,6 +1367,9 @@ void Application::HandleStateChangedEvent() {
 #endif
             break;
         case kDeviceStateWifiConfiguring:
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+            StopKidsEnglishRecordingDetection();
+#endif
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(false);
             break;
@@ -1276,7 +1402,11 @@ void Application::SetListeningMode(ListeningMode mode) {
 
 ListeningMode Application::GetDefaultListeningMode() const {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
+#if CONFIG_USE_AUDIO_PROCESSOR
+    return kListeningModeAutoStop;
+#else
     return kListeningModeManualStop;
+#endif
 #else
     return aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime;
 #endif

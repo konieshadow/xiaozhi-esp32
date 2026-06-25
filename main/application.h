@@ -153,6 +153,10 @@ private:
     TaskHandle_t kids_english_self_test_task_handle_ = nullptr;
     TaskHandle_t kids_english_submit_recording_task_handle_ = nullptr;
     TaskHandle_t kids_english_simulated_recording_task_handle_ = nullptr;
+    bool kids_english_recording_detector_active_ = false;
+    bool kids_english_recording_has_voice_ = false;
+    int64_t kids_english_recording_started_at_ms_ = 0;
+    int64_t kids_english_recording_silence_started_at_ms_ = 0;
 
 
     // Event handlers
@@ -167,11 +171,16 @@ private:
     void ContinueOpenAudioChannel(ListeningMode mode);
     void ContinueWakeWordInvoke(const std::string& wake_word);
     void SubmitKidsEnglishRecording();
+    void CancelKidsEnglishRecording(const char* reason);
     bool StartKidsEnglishRecordingSubmission(std::vector<int16_t>&& pcm, const char* source);
     void MaybeStartKidsEnglishSelfTest();
     void KidsEnglishSelfTestTask();
     void KidsEnglishSubmitRecordingTask(std::vector<int16_t> pcm);
     void KidsEnglishSimulatedRecordingTask(std::string text);
+    void StartKidsEnglishRecordingDetection();
+    void StopKidsEnglishRecordingDetection();
+    void HandleKidsEnglishVadChange(bool speaking);
+    void CheckKidsEnglishRecordingAutoStop();
 
     // Activation task (runs in background)
     void ActivationTask();
