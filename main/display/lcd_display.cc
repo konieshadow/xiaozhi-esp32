@@ -29,10 +29,28 @@ struct DebugPhrase {
 };
 
 constexpr DebugPhrase kDebugPhrases[] = {
+    {"Hello.", "Hello."},
+    {"How are you?", "How are you?"},
+    {"I'm fine.", "I'm fine, thank you."},
     {"I like apples.", "I like apples."},
     {"My name is Tom.", "My name is Tom."},
     {"I am seven years old.", "I am seven years old."},
+    {"I like soccer.", "I like playing soccer with my friends."},
+    {"I like drawing.", "I like drawing pictures."},
+    {"Favorite color.", "My favorite color is blue."},
+    {"Favorite animal.", "My favorite animal is a cat."},
+    {"My family.", "I live with my mom, my dad, and my sister."},
+    {"At school.", "I go to school every day."},
+    {"My teacher.", "My teacher is very kind."},
+    {"Lunch.", "I had rice and chicken for lunch."},
+    {"Weekend.", "I went to the park last weekend."},
+    {"Weather.", "It is sunny today."},
+    {"Feelings.", "I feel happy today."},
     {"Can I have some water?", "Can I have some water?"},
+    {"Repeat please.", "Can you say that again, please?"},
+    {"I don't know.", "I don't know how to say it in English."},
+    {"Help me.", "Can you help me with this word?"},
+    {"Goodbye.", "Goodbye. See you next time."},
 };
 }  // namespace
 
@@ -353,9 +371,16 @@ LcdDisplay::~LcdDisplay() {
     }
     if (status_bar_ != nullptr) {
         lv_obj_del(status_bar_);
+        status_label_ = nullptr;
+        notification_label_ = nullptr;
     }
     if (top_bar_ != nullptr) {
         lv_obj_del(top_bar_);
+        network_label_ = nullptr;
+        mute_label_ = nullptr;
+        battery_label_ = nullptr;
+        battery_voltage_label_ = nullptr;
+        conversation_status_label_ = nullptr;
     }
     if (side_bar_ != nullptr) {
         lv_obj_del(side_bar_);
@@ -390,6 +415,7 @@ lv_obj_t* LcdDisplay::CreateDebugAction(lv_obj_t* parent, const char* icon_text,
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
     auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
     auto icon_font = lvgl_theme->icon_font()->font();
+    const lv_opa_t button_bg_opa = DISPLAY_ROUND_SAFE_STATUS_BAR ? LV_OPA_40 : LV_OPA_70;
 
     auto button = lv_button_create(parent);
     lv_obj_set_width(button, LV_PCT(100));
@@ -397,7 +423,7 @@ lv_obj_t* LcdDisplay::CreateDebugAction(lv_obj_t* parent, const char* icon_text,
     lv_obj_set_style_min_height(button, 38, 0);
     lv_obj_set_style_radius(button, 7, 0);
     lv_obj_set_style_bg_color(button, lvgl_theme->chat_background_color(), 0);
-    lv_obj_set_style_bg_opa(button, LV_OPA_70, 0);
+    lv_obj_set_style_bg_opa(button, button_bg_opa, 0);
     lv_obj_set_style_border_width(button, 0, 0);
     lv_obj_set_style_pad_left(button, lvgl_theme->spacing(4), 0);
     lv_obj_set_style_pad_right(button, lvgl_theme->spacing(4), 0);
@@ -437,13 +463,14 @@ lv_obj_t* LcdDisplay::CreateDebugAction(lv_obj_t* parent, const char* icon_text,
 void LcdDisplay::AddDebugInfoRow(lv_obj_t* parent, const char* label, const std::string& value) {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
     auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+    const lv_opa_t row_bg_opa = DISPLAY_ROUND_SAFE_STATUS_BAR ? LV_OPA_40 : LV_OPA_60;
 
     auto row = lv_obj_create(parent);
     lv_obj_set_width(row, LV_PCT(100));
     lv_obj_set_height(row, LV_SIZE_CONTENT);
     lv_obj_set_style_radius(row, 6, 0);
     lv_obj_set_style_bg_color(row, lvgl_theme->chat_background_color(), 0);
-    lv_obj_set_style_bg_opa(row, LV_OPA_60, 0);
+    lv_obj_set_style_bg_opa(row, row_bg_opa, 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_pad_all(row, lvgl_theme->spacing(3), 0);
     lv_obj_set_style_pad_row(row, lvgl_theme->spacing(1), 0);
@@ -477,6 +504,19 @@ void LcdDisplay::CreateDebugEntry() {
     auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
     auto icon_font = lvgl_theme->icon_font()->font();
     auto screen = lv_screen_active();
+    const bool round_safe = DISPLAY_ROUND_SAFE_STATUS_BAR;
+    const int panel_width = round_safe ? LV_HOR_RES * 80 / 100 : LV_HOR_RES * 92 / 100;
+    const int panel_height = round_safe ? LV_VER_RES * 68 / 100 : LV_VER_RES * 90 / 100;
+    const int panel_y_offset = round_safe ? -14 : 0;
+    const int panel_radius = round_safe ? 16 : 18;
+    const lv_opa_t panel_bg_opa = round_safe ? LV_OPA_60 : LV_OPA_90;
+    const int panel_padding = round_safe ? lvgl_theme->spacing(4) : lvgl_theme->spacing(4);
+    const int header_height = round_safe ? 44 : 34;
+    const int header_button_size = round_safe ? 38 : 30;
+    const int header_button_radius = header_button_size / 2;
+    const int header_side_padding = round_safe ? lvgl_theme->spacing(9) : 0;
+    const lv_opa_t header_button_bg_opa = round_safe ? LV_OPA_20 : LV_OPA_TRANSP;
+    const int header_button_ext_click_area = round_safe ? 8 : 4;
 
     debug_button_ = lv_button_create(screen);
     lv_obj_set_size(debug_button_, 42, 42);
@@ -495,16 +535,14 @@ void LcdDisplay::CreateDebugEntry() {
     lv_obj_center(icon);
 
     debug_menu_ = lv_obj_create(screen);
-    int panel_width = DISPLAY_ROUND_SAFE_STATUS_BAR ? LV_HOR_RES * 82 / 100 : LV_HOR_RES * 92 / 100;
-    int panel_height = DISPLAY_ROUND_SAFE_STATUS_BAR ? LV_VER_RES * 82 / 100 : LV_VER_RES * 90 / 100;
     lv_obj_set_size(debug_menu_, panel_width, panel_height);
-    lv_obj_center(debug_menu_);
-    lv_obj_set_style_radius(debug_menu_, 18, 0);
+    lv_obj_align(debug_menu_, LV_ALIGN_CENTER, 0, panel_y_offset);
+    lv_obj_set_style_radius(debug_menu_, panel_radius, 0);
     lv_obj_set_style_bg_color(debug_menu_, lvgl_theme->background_color(), 0);
-    lv_obj_set_style_bg_opa(debug_menu_, LV_OPA_90, 0);
+    lv_obj_set_style_bg_opa(debug_menu_, panel_bg_opa, 0);
     lv_obj_set_style_border_width(debug_menu_, 1, 0);
     lv_obj_set_style_border_color(debug_menu_, lvgl_theme->border_color(), 0);
-    lv_obj_set_style_pad_all(debug_menu_, lvgl_theme->spacing(4), 0);
+    lv_obj_set_style_pad_all(debug_menu_, panel_padding, 0);
     lv_obj_set_style_pad_row(debug_menu_, lvgl_theme->spacing(2), 0);
     lv_obj_set_flex_flow(debug_menu_, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scrollbar_mode(debug_menu_, LV_SCROLLBAR_MODE_OFF);
@@ -514,21 +552,25 @@ void LcdDisplay::CreateDebugEntry() {
 
     auto header = lv_obj_create(debug_menu_);
     lv_obj_set_width(header, LV_PCT(100));
-    lv_obj_set_height(header, 34);
+    lv_obj_set_height(header, header_height);
     lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(header, 0, 0);
     lv_obj_set_style_pad_all(header, 0, 0);
+    lv_obj_set_style_pad_left(header, header_side_padding, 0);
+    lv_obj_set_style_pad_right(header, header_side_padding, 0);
     lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(header, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollbar_mode(header, LV_SCROLLBAR_MODE_OFF);
 
     debug_back_button_ = lv_button_create(header);
-    lv_obj_set_size(debug_back_button_, 30, 30);
-    lv_obj_set_style_radius(debug_back_button_, 15, 0);
-    lv_obj_set_style_bg_opa(debug_back_button_, LV_OPA_TRANSP, 0);
+    lv_obj_set_size(debug_back_button_, header_button_size, header_button_size);
+    lv_obj_set_style_radius(debug_back_button_, header_button_radius, 0);
+    lv_obj_set_style_bg_color(debug_back_button_, lvgl_theme->chat_background_color(), 0);
+    lv_obj_set_style_bg_opa(debug_back_button_, header_button_bg_opa, 0);
     lv_obj_set_style_border_width(debug_back_button_, 0, 0);
     lv_obj_set_style_pad_all(debug_back_button_, 0, 0);
+    lv_obj_set_ext_click_area(debug_back_button_, header_button_ext_click_area);
     lv_obj_set_user_data(debug_back_button_, this);
     auto back_icon = lv_label_create(debug_back_button_);
     lv_label_set_text(back_icon, FONT_AWESOME_ARROW_LEFT);
@@ -551,11 +593,13 @@ void LcdDisplay::CreateDebugEntry() {
     lv_obj_set_style_text_align(debug_title_label_, LV_TEXT_ALIGN_CENTER, 0);
 
     debug_close_button_ = lv_button_create(header);
-    lv_obj_set_size(debug_close_button_, 30, 30);
-    lv_obj_set_style_radius(debug_close_button_, 15, 0);
-    lv_obj_set_style_bg_opa(debug_close_button_, LV_OPA_TRANSP, 0);
+    lv_obj_set_size(debug_close_button_, header_button_size, header_button_size);
+    lv_obj_set_style_radius(debug_close_button_, header_button_radius, 0);
+    lv_obj_set_style_bg_color(debug_close_button_, lvgl_theme->chat_background_color(), 0);
+    lv_obj_set_style_bg_opa(debug_close_button_, header_button_bg_opa, 0);
     lv_obj_set_style_border_width(debug_close_button_, 0, 0);
     lv_obj_set_style_pad_all(debug_close_button_, 0, 0);
+    lv_obj_set_ext_click_area(debug_close_button_, header_button_ext_click_area);
     lv_obj_set_user_data(debug_close_button_, this);
     auto close_icon = lv_label_create(debug_close_button_);
     lv_label_set_text(close_icon, FONT_AWESOME_XMARK);
@@ -793,17 +837,15 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_text_font(mute_label_, icon_font, 0);
     lv_obj_set_style_text_color(mute_label_, lvgl_theme->text_color(), 0);
 
-    battery_label_ = lv_label_create(right_icons);
-    lv_label_set_text(battery_label_, "");
-    lv_obj_set_style_text_font(battery_label_, icon_font, 0);
-    lv_obj_set_style_text_color(battery_label_, lvgl_theme->text_color(), 0);
-    lv_obj_set_style_margin_left(battery_label_, lvgl_theme->spacing(2), 0);
-
-    battery_voltage_label_ = lv_label_create(right_icons);
-    lv_label_set_text(battery_voltage_label_, "");
-    lv_obj_set_style_text_font(battery_voltage_label_, text_font, 0);
-    lv_obj_set_style_text_color(battery_voltage_label_, lvgl_theme->text_color(), 0);
-    lv_obj_set_style_margin_left(battery_voltage_label_, lvgl_theme->spacing(1), 0);
+    conversation_status_label_ = lv_label_create(right_icons);
+    lv_label_set_text(conversation_status_label_, "今日0轮");
+    lv_label_set_long_mode(conversation_status_label_, LV_LABEL_LONG_CLIP);
+    lv_obj_set_width(conversation_status_label_,
+                     DISPLAY_ROUND_SAFE_STATUS_BAR ? LV_HOR_RES * 22 / 100 : LV_SIZE_CONTENT);
+    lv_obj_set_style_text_font(conversation_status_label_, text_font, 0);
+    lv_obj_set_style_text_color(conversation_status_label_, lvgl_theme->text_color(), 0);
+    lv_obj_set_style_text_align(conversation_status_label_, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_margin_left(conversation_status_label_, lvgl_theme->spacing(2), 0);
 
     /* Layer 2: Status bar - for center text labels */
     status_bar_ = lv_obj_create(screen);
@@ -1200,6 +1242,12 @@ void LcdDisplay::SetupUI() {
     const int safe_status_bar_width = DISPLAY_ROUND_SAFE_STATUS_BAR ? LV_HOR_RES * 58 / 100 : LV_HOR_RES;
     const int safe_status_bar_y = DISPLAY_ROUND_SAFE_STATUS_BAR ? 40 : 0;
     const int safe_status_bar_padding = DISPLAY_ROUND_SAFE_STATUS_BAR ? lvgl_theme->spacing(1) : lvgl_theme->spacing(4);
+    const int safe_subtitle_bar_width =
+        DISPLAY_ROUND_SAFE_STATUS_BAR ? LV_HOR_RES * 64 / 100 : LV_HOR_RES;
+    const int safe_subtitle_bottom_offset = DISPLAY_ROUND_SAFE_STATUS_BAR ? -42 : 0;
+    const int safe_subtitle_radius = DISPLAY_ROUND_SAFE_STATUS_BAR ? 8 : 0;
+    const int safe_subtitle_label_width =
+        std::max(40, safe_subtitle_bar_width - lvgl_theme->spacing(8));
 
     auto screen = lv_screen_active();
     lv_obj_set_style_text_font(screen, text_font, 0);
@@ -1275,17 +1323,15 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_text_font(mute_label_, icon_font, 0);
     lv_obj_set_style_text_color(mute_label_, lvgl_theme->text_color(), 0);
 
-    battery_label_ = lv_label_create(right_icons);
-    lv_label_set_text(battery_label_, "");
-    lv_obj_set_style_text_font(battery_label_, icon_font, 0);
-    lv_obj_set_style_text_color(battery_label_, lvgl_theme->text_color(), 0);
-    lv_obj_set_style_margin_left(battery_label_, lvgl_theme->spacing(2), 0);
-
-    battery_voltage_label_ = lv_label_create(right_icons);
-    lv_label_set_text(battery_voltage_label_, "");
-    lv_obj_set_style_text_font(battery_voltage_label_, text_font, 0);
-    lv_obj_set_style_text_color(battery_voltage_label_, lvgl_theme->text_color(), 0);
-    lv_obj_set_style_margin_left(battery_voltage_label_, lvgl_theme->spacing(1), 0);
+    conversation_status_label_ = lv_label_create(right_icons);
+    lv_label_set_text(conversation_status_label_, "今日0轮");
+    lv_label_set_long_mode(conversation_status_label_, LV_LABEL_LONG_CLIP);
+    lv_obj_set_width(conversation_status_label_,
+                     DISPLAY_ROUND_SAFE_STATUS_BAR ? LV_HOR_RES * 22 / 100 : LV_SIZE_CONTENT);
+    lv_obj_set_style_text_font(conversation_status_label_, text_font, 0);
+    lv_obj_set_style_text_color(conversation_status_label_, lvgl_theme->text_color(), 0);
+    lv_obj_set_style_text_align(conversation_status_label_, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_margin_left(conversation_status_label_, lvgl_theme->spacing(2), 0);
 
     /* Layer 2: Status bar - for center text labels */
     status_bar_ = lv_obj_create(screen);
@@ -1319,21 +1365,21 @@ void LcdDisplay::SetupUI() {
 #if CONFIG_USE_MULTILINE_CHAT_MESSAGE
     /* Bottom bar - auto height, grows upward with wrapped text */
     bottom_bar_ = lv_obj_create(screen);
-    lv_obj_set_width(bottom_bar_, LV_HOR_RES);
+    lv_obj_set_width(bottom_bar_, safe_subtitle_bar_width);
     lv_obj_set_height(bottom_bar_, LV_SIZE_CONTENT);
-    lv_obj_set_style_radius(bottom_bar_, 0, 0);
+    lv_obj_set_style_radius(bottom_bar_, safe_subtitle_radius, 0);
     lv_obj_set_style_bg_color(bottom_bar_, lvgl_theme->background_color(), 0);
     lv_obj_set_style_bg_opa(bottom_bar_, LV_OPA_50, 0);
     lv_obj_set_style_text_color(bottom_bar_, lvgl_theme->text_color(), 0);
     lv_obj_set_style_pad_all(bottom_bar_, lvgl_theme->spacing(4), 0);
     lv_obj_set_style_border_width(bottom_bar_, 0, 0);
     lv_obj_set_scrollbar_mode(bottom_bar_, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_align(bottom_bar_, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_align(bottom_bar_, LV_ALIGN_BOTTOM_MID, 0, safe_subtitle_bottom_offset);
 
     /* chat_message_label_ placed in bottom_bar_, multiline wrapped display */
     chat_message_label_ = lv_label_create(bottom_bar_);
     lv_label_set_text(chat_message_label_, "");
-    lv_obj_set_width(chat_message_label_, LV_HOR_RES - lvgl_theme->spacing(8));
+    lv_obj_set_width(chat_message_label_, safe_subtitle_label_width);
     lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(chat_message_label_, lvgl_theme->text_color(), 0);
@@ -1342,8 +1388,9 @@ void LcdDisplay::SetupUI() {
 #else
     /* Top layer: Bottom bar - fixed height at bottom */
     bottom_bar_ = lv_obj_create(screen);
-    lv_obj_set_size(bottom_bar_, LV_HOR_RES, text_font->line_height + lvgl_theme->spacing(8));
-    lv_obj_set_style_radius(bottom_bar_, 0, 0);
+    lv_obj_set_size(bottom_bar_, safe_subtitle_bar_width,
+                    text_font->line_height + lvgl_theme->spacing(8));
+    lv_obj_set_style_radius(bottom_bar_, safe_subtitle_radius, 0);
     lv_obj_set_style_bg_color(bottom_bar_, lvgl_theme->background_color(), 0);
     lv_obj_set_style_text_color(bottom_bar_, lvgl_theme->text_color(), 0);
     lv_obj_set_style_pad_all(bottom_bar_, 0, 0);
@@ -1351,12 +1398,12 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_pad_right(bottom_bar_, lvgl_theme->spacing(4), 0);
     lv_obj_set_style_border_width(bottom_bar_, 0, 0);
     lv_obj_set_scrollbar_mode(bottom_bar_, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_align(bottom_bar_, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_align(bottom_bar_, LV_ALIGN_BOTTOM_MID, 0, safe_subtitle_bottom_offset);
 
     /* chat_message_label_ placed in bottom_bar_, single-line horizontal scroll */
     chat_message_label_ = lv_label_create(bottom_bar_);
     lv_label_set_text(chat_message_label_, "");
-    lv_obj_set_width(chat_message_label_, LV_HOR_RES - lvgl_theme->spacing(8));
+    lv_obj_set_width(chat_message_label_, safe_subtitle_label_width);
     lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(chat_message_label_, lvgl_theme->text_color(), 0);
@@ -1448,7 +1495,8 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
     // Re-align bottom_bar_ after text change so it stays anchored to the bottom
     // as its height adapts to the wrapped content.
     if (bottom_bar_ != nullptr) {
-        lv_obj_align(bottom_bar_, LV_ALIGN_BOTTOM_MID, 0, 0);
+        const int safe_subtitle_bottom_offset = DISPLAY_ROUND_SAFE_STATUS_BAR ? -42 : 0;
+        lv_obj_align(bottom_bar_, LV_ALIGN_BOTTOM_MID, 0, safe_subtitle_bottom_offset);
     }
 #endif
 }
@@ -1557,16 +1605,18 @@ void LcdDisplay::SetTheme(Theme* theme) {
     auto large_icon_font = lvgl_theme->large_icon_font()->font();
 
     if (text_font->line_height >= 40) {
-        lv_obj_set_style_text_font(mute_label_, large_icon_font, 0);
-        lv_obj_set_style_text_font(battery_label_, large_icon_font, 0);
+        if (mute_label_ != nullptr) {
+            lv_obj_set_style_text_font(mute_label_, large_icon_font, 0);
+        }
         lv_obj_set_style_text_font(network_label_, large_icon_font, 0);
     } else {
-        lv_obj_set_style_text_font(mute_label_, icon_font, 0);
-        lv_obj_set_style_text_font(battery_label_, icon_font, 0);
+        if (mute_label_ != nullptr) {
+            lv_obj_set_style_text_font(mute_label_, icon_font, 0);
+        }
         lv_obj_set_style_text_font(network_label_, icon_font, 0);
     }
-    if (battery_voltage_label_ != nullptr) {
-        lv_obj_set_style_text_font(battery_voltage_label_, text_font, 0);
+    if (conversation_status_label_ != nullptr) {
+        lv_obj_set_style_text_font(conversation_status_label_, text_font, 0);
     }
 
     // Set parent text color
@@ -1591,10 +1641,11 @@ void LcdDisplay::SetTheme(Theme* theme) {
     lv_obj_set_style_text_color(network_label_, lvgl_theme->text_color(), 0);
     lv_obj_set_style_text_color(status_label_, lvgl_theme->text_color(), 0);
     lv_obj_set_style_text_color(notification_label_, lvgl_theme->text_color(), 0);
-    lv_obj_set_style_text_color(mute_label_, lvgl_theme->text_color(), 0);
-    lv_obj_set_style_text_color(battery_label_, lvgl_theme->text_color(), 0);
-    if (battery_voltage_label_ != nullptr) {
-        lv_obj_set_style_text_color(battery_voltage_label_, lvgl_theme->text_color(), 0);
+    if (mute_label_ != nullptr) {
+        lv_obj_set_style_text_color(mute_label_, lvgl_theme->text_color(), 0);
+    }
+    if (conversation_status_label_ != nullptr) {
+        lv_obj_set_style_text_color(conversation_status_label_, lvgl_theme->text_color(), 0);
     }
     lv_obj_set_style_text_color(emoji_label_, lvgl_theme->text_color(), 0);
 

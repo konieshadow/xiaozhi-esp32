@@ -210,6 +210,7 @@ bool KidsEnglishProtocol::OpenAudioChannel() {
     if (!StartConversation(trigger.c_str())) {
         return false;
     }
+    EmitConversationStarted();
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -340,8 +341,10 @@ bool KidsEnglishProtocol::RunSelfTest() {
     }
     ESP_LOGI(TAG,
              "KIDS_ENGLISH_SELF_TEST_STEP standalone_tts ok requestId=%s format=%s "
-             "ttsUrl=%s providerFallback=%s providerErrorCode=%s",
+             "ttsTextPresent=%s ttsText=%s ttsUrl=%s providerFallback=%s providerErrorCode=%s",
              standalone_tts.request_id.c_str(), standalone_tts.audio_format.c_str(),
+             standalone_tts.has_tts_text ? "true" : "false",
+             standalone_tts.tts_text.c_str(),
              standalone_tts.tts_audio_url.c_str(),
              standalone_tts.provider_fallback ? "true" : "false",
              standalone_tts.provider_error_code.c_str());
@@ -487,8 +490,19 @@ void KidsEnglishProtocol::SendStopListening() {
 }
 
 bool KidsEnglishProtocol::SendText(const std::string& text) {
-    ESP_LOGI(TAG, "Ignoring text command in kids English HTTP protocol: %s", text.c_str());
-    return true;
+    if (text.empty()) {
+        return true;
+    }
+    if (text[0] == '{') {
+        ESP_LOGI(TAG, "Ignoring JSON command in kids English HTTP protocol: %s", text.c_str());
+        return true;
+    }
+
+    StandaloneTtsResponse response;
+    if (!RequestStandaloneTts(text, response)) {
+        return false;
+    }
+    return HandleStandaloneTtsResponse(response, true);
 }
 
 std::string KidsEnglishProtocol::BuildUrl(const char* path) const {
@@ -910,11 +924,15 @@ KidsEnglishProtocol::UploadResult KidsEnglishProtocol::UploadPcmAudio(
 
     ESP_LOGI(TAG,
              "Kids English turn result: deviceId=%s conversationId=%s turnId=%s requestId=%s "
-             "recordingBytes=%u httpStatus=%d asrDurationMs=%d llmDurationMs=%d "
+             "recordingBytes=%u httpStatus=%d ttsTextPresent=%s ttsAudioUrl=%s "
+             "providerFallback=%s providerErrorCode=%s asrDurationMs=%d llmDurationMs=%d "
              "ttsDurationMs=%d totalDurationMs=%d",
              device_id_.c_str(), conversation_id.c_str(), result.turn_id.c_str(),
-             result.request_id.c_str(), (unsigned)pcm_bytes, status, result.asr_duration_ms,
-             result.llm_duration_ms, result.tts_duration_ms, result.total_duration_ms);
+             result.request_id.c_str(), (unsigned)pcm_bytes, status,
+             result.has_tts_text ? "true" : "false", result.tts_audio_url.c_str(),
+             result.provider_fallback ? "true" : "false", result.provider_error_code.c_str(),
+             result.asr_duration_ms, result.llm_duration_ms, result.tts_duration_ms,
+             result.total_duration_ms);
     EmitSttMessage("Audio submitted.");
     return HandleConversationResponse(result, "I heard you.", true) ? UploadResult::kSuccess
                                                                     : UploadResult::kFailed;
@@ -937,9 +955,11 @@ bool KidsEnglishProtocol::RequestStandaloneTts(const std::string& text,
     }
 
     ESP_LOGI(TAG,
-             "Standalone TTS result: requestId=%s format=%s ttsUrl=%s ttsDurationMs=%d "
-             "totalDurationMs=%d providerFallback=%s providerErrorCode=%s",
+             "Standalone TTS result: requestId=%s format=%s ttsTextPresent=%s ttsText=%s "
+             "ttsUrl=%s ttsDurationMs=%d totalDurationMs=%d providerFallback=%s "
+             "providerErrorCode=%s",
              response.request_id.c_str(), response.audio_format.c_str(),
+             response.has_tts_text ? "true" : "false", response.tts_text.c_str(),
              response.tts_audio_url.c_str(), response.tts_duration_ms, response.total_duration_ms,
              response.provider_fallback ? "true" : "false", response.provider_error_code.c_str());
     return true;
@@ -1035,6 +1055,7 @@ bool KidsEnglishProtocol::ParseConversationResponse(const cJSON* root, Conversat
     auto device_state = cJSON_GetObjectItem(data, "deviceState");
     auto screen_cue = cJSON_GetObjectItem(data, "screenCue");
     auto tts_audio_url = cJSON_GetObjectItem(data, "ttsAudioUrl");
+    auto tts_text = cJSON_GetObjectItem(data, "ttsText");
     auto audio_format = cJSON_GetObjectItem(data, "audioFormat");
     auto should_continue_listening = cJSON_GetObjectItem(data, "shouldContinueListening");
     auto diagnostics = cJSON_GetObjectItem(data, "diagnostics");
@@ -1057,6 +1078,8 @@ bool KidsEnglishProtocol::ParseConversationResponse(const cJSON* root, Conversat
     result.device_state = device_state->valuestring;
     result.screen_cue = JsonString(screen_cue);
     result.tts_audio_url = JsonString(tts_audio_url);
+    result.has_tts_text = cJSON_IsString(tts_text);
+    result.tts_text = JsonString(tts_text);
     result.audio_format = JsonString(audio_format);
     result.should_continue_listening = JsonBool(should_continue_listening, true);
     result.request_id = JsonString(request_id);
@@ -1066,6 +1089,14 @@ bool KidsEnglishProtocol::ParseConversationResponse(const cJSON* root, Conversat
     result.total_duration_ms = JsonInt(total_duration_ms);
     result.provider_fallback = JsonBool(provider_fallback);
     result.provider_error_code = JsonString(provider_error_code);
+    if (!result.tts_audio_url.empty() && !result.has_tts_text) {
+        ESP_LOGW(TAG,
+                 "Conversation response missing ttsText: requestId=%s ttsAudioUrl=%s "
+                 "providerFallback=%s providerErrorCode=%s",
+                 result.request_id.c_str(), result.tts_audio_url.c_str(),
+                 result.provider_fallback ? "true" : "false",
+                 result.provider_error_code.c_str());
+    }
     return true;
 }
 
@@ -1073,6 +1104,7 @@ bool KidsEnglishProtocol::ParseStandaloneTtsResponse(const cJSON* root,
                                                      StandaloneTtsResponse& result) {
     auto data = cJSON_GetObjectItem(root, "data");
     auto tts_audio_url = cJSON_GetObjectItem(data, "ttsAudioUrl");
+    auto tts_text = cJSON_GetObjectItem(data, "ttsText");
     auto audio_format = cJSON_GetObjectItem(data, "audioFormat");
     auto diagnostics = cJSON_GetObjectItem(data, "diagnostics");
     auto request_id = cJSON_GetObjectItem(diagnostics, "requestId");
@@ -1087,12 +1119,22 @@ bool KidsEnglishProtocol::ParseStandaloneTtsResponse(const cJSON* root,
     }
 
     result.tts_audio_url = tts_audio_url->valuestring;
+    result.has_tts_text = cJSON_IsString(tts_text);
+    result.tts_text = JsonString(tts_text);
     result.audio_format = JsonString(audio_format);
     result.request_id = JsonString(request_id);
     result.tts_duration_ms = JsonInt(tts_duration_ms);
     result.total_duration_ms = JsonInt(total_duration_ms);
     result.provider_fallback = JsonBool(provider_fallback);
     result.provider_error_code = JsonString(provider_error_code);
+    if (!result.has_tts_text) {
+        ESP_LOGW(TAG,
+                 "Standalone TTS response missing ttsText: requestId=%s ttsAudioUrl=%s "
+                 "providerFallback=%s providerErrorCode=%s",
+                 result.request_id.c_str(), result.tts_audio_url.c_str(),
+                 result.provider_fallback ? "true" : "false",
+                 result.provider_error_code.c_str());
+    }
     return true;
 }
 
@@ -1288,12 +1330,15 @@ bool KidsEnglishProtocol::ReadHttpBody(Http* http, std::string& body) {
 bool KidsEnglishProtocol::HandleConversationResponse(const ConversationResponse& response,
                                                      const char* fallback_text,
                                                      bool wait_for_playback) {
+    (void)fallback_text;
     ESP_LOGI(TAG,
-             "Conversation response: conversationId=%s turnId=%s state=%s cue=%s tts=%s "
-             "format=%s continue=%s requestId=%s asr=%d llm=%d ttsMs=%d total=%d "
-             "providerFallback=%s providerErrorCode=%s",
+             "Conversation response: conversationId=%s turnId=%s state=%s cue=%s "
+             "ttsTextPresent=%s ttsText=%s ttsAudioUrl=%s format=%s continue=%s "
+             "requestId=%s asr=%d llm=%d ttsMs=%d total=%d providerFallback=%s "
+             "providerErrorCode=%s",
              response.conversation_id.c_str(), response.turn_id.c_str(),
              response.device_state.c_str(), response.screen_cue.c_str(),
+             response.has_tts_text ? "true" : "false", response.tts_text.c_str(),
              response.tts_audio_url.c_str(), response.audio_format.c_str(),
              response.should_continue_listening ? "true" : "false", response.request_id.c_str(),
              response.asr_duration_ms, response.llm_duration_ms, response.tts_duration_ms,
@@ -1312,10 +1357,18 @@ bool KidsEnglishProtocol::HandleConversationResponse(const ConversationResponse&
     }
 
     EmitTtsMessage("start");
-    EmitAssistantMessage(fallback_text == nullptr ? "Let's keep talking." : fallback_text);
+    const std::string display_text = response.has_tts_text ? response.tts_text : "";
+    if (!display_text.empty()) {
+        EmitAssistantMessage(display_text);
+    }
     bool played = true;
     if (!response.tts_audio_url.empty()) {
-        ESP_LOGI(TAG, "Conversation ttsAudioUrl: %s", response.tts_audio_url.c_str());
+        ESP_LOGI(TAG,
+                 "Conversation TTS playback: requestId=%s ttsTextPresent=%s ttsAudioUrl=%s "
+                 "providerFallback=%s providerErrorCode=%s",
+                 response.request_id.c_str(), response.has_tts_text ? "true" : "false",
+                 response.tts_audio_url.c_str(), response.provider_fallback ? "true" : "false",
+                 response.provider_error_code.c_str());
         if (!DownloadAndPlayTtsAudio(response.tts_audio_url)) {
             ESP_LOGW(TAG, "Failed to download/play TTS audio; falling back to text-only feedback");
             played = false;
@@ -1331,8 +1384,40 @@ bool KidsEnglishProtocol::HandleConversationResponse(const ConversationResponse&
         conversation_id_.clear();
         session_id_.clear();
     }
-    EmitTtsMessage("stop", fallback_text, response.should_continue_listening);
+    EmitTtsMessage("stop", display_text.empty() ? nullptr : display_text.c_str(),
+                   response.should_continue_listening);
     EmitEmotion(response.should_continue_listening ? "happy" : "neutral");
+    return played;
+}
+
+bool KidsEnglishProtocol::HandleStandaloneTtsResponse(const StandaloneTtsResponse& response,
+                                                      bool wait_for_playback) {
+    ESP_LOGI(TAG,
+             "Standalone TTS playback: requestId=%s ttsTextPresent=%s ttsText=%s "
+             "ttsAudioUrl=%s format=%s providerFallback=%s providerErrorCode=%s",
+             response.request_id.c_str(), response.has_tts_text ? "true" : "false",
+             response.tts_text.c_str(), response.tts_audio_url.c_str(), response.audio_format.c_str(),
+             response.provider_fallback ? "true" : "false", response.provider_error_code.c_str());
+
+    EmitTtsMessage("start");
+    if (!response.tts_text.empty()) {
+        EmitAssistantMessage(response.tts_text);
+    }
+
+    bool played = true;
+    if (!response.tts_audio_url.empty()) {
+        if (!DownloadAndPlayTtsAudio(response.tts_audio_url)) {
+            ESP_LOGW(TAG, "Failed to download/play standalone TTS audio");
+            played = false;
+        } else if (wait_for_playback) {
+            Application::GetInstance().GetAudioService().WaitForPlaybackQueueEmpty();
+        }
+    } else {
+        played = false;
+    }
+
+    EmitTtsMessage("stop", response.tts_text.empty() ? nullptr : response.tts_text.c_str(), false);
+    EmitEmotion("neutral");
     return played;
 }
 
@@ -1366,6 +1451,13 @@ void KidsEnglishProtocol::EmitAssistantMessage(const std::string& text) {
     cJSON_AddStringToObject(root, "type", "tts");
     cJSON_AddStringToObject(root, "state", "sentence_start");
     cJSON_AddStringToObject(root, "text", text.c_str());
+    DispatchJson(root);
+}
+
+void KidsEnglishProtocol::EmitConversationStarted() {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "type", "conversation");
+    cJSON_AddStringToObject(root, "event", "started");
     DispatchJson(root);
 }
 

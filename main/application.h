@@ -118,6 +118,7 @@ public:
     void ShowDebugInfo();
     void ClearDebugMessages();
     void SendSimulatedRecording(const std::string& text);
+    void MarkKidsEnglishConversationStarted();
     
     /**
      * Reset protocol resources (thread-safe)
@@ -153,8 +154,15 @@ private:
     TaskHandle_t kids_english_self_test_task_handle_ = nullptr;
     TaskHandle_t kids_english_submit_recording_task_handle_ = nullptr;
     TaskHandle_t kids_english_simulated_recording_task_handle_ = nullptr;
+    std::deque<std::string> kids_english_simulated_recording_queue_;
+    std::vector<int16_t> kids_english_simulated_recording_pcm_;
+    std::string kids_english_simulated_recording_text_;
     bool kids_english_recording_detector_active_ = false;
     bool kids_english_recording_has_voice_ = false;
+    bool kids_english_simulated_recording_active_ = false;
+    bool kids_english_simulated_submit_requested_ = false;
+    int kids_english_daily_conversation_count_ = 0;
+    int kids_english_daily_conversation_yday_ = -1;
     int64_t kids_english_recording_started_at_ms_ = 0;
     int64_t kids_english_recording_silence_started_at_ms_ = 0;
 
@@ -173,14 +181,19 @@ private:
     void SubmitKidsEnglishRecording();
     void CancelKidsEnglishRecording(const char* reason);
     bool StartKidsEnglishRecordingSubmission(std::vector<int16_t>&& pcm, const char* source);
+    bool StartKidsEnglishSimulatedRecordingTask();
     void MaybeStartKidsEnglishSelfTest();
     void KidsEnglishSelfTestTask();
     void KidsEnglishSubmitRecordingTask(std::vector<int16_t> pcm);
     void KidsEnglishSimulatedRecordingTask(std::string text);
+    bool AppendKidsEnglishSimulatedRecordingSegment(const std::string& text,
+                                                    std::vector<int16_t>&& pcm);
     void StartKidsEnglishRecordingDetection();
     void StopKidsEnglishRecordingDetection();
     void HandleKidsEnglishVadChange(bool speaking);
     void CheckKidsEnglishRecordingAutoStop();
+    void ResetKidsEnglishDailyStatusIfNeeded();
+    void UpdateKidsEnglishConversationStatus(const char* phase = nullptr);
 
     // Activation task (runs in background)
     void ActivationTask();

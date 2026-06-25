@@ -18,6 +18,7 @@
 #include <arpa/inet.h>
 #include <font_awesome.h>
 #include <utility>
+#include <ctime>
 
 #define TAG "Application"
 
@@ -75,6 +76,9 @@ void Application::Initialize() {
     // Setup the display
     auto display = board.GetDisplay();
     display->SetupUI();
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    UpdateKidsEnglishConversationStatus();
+#endif
     // Print board name/version info
     display->SetChatMessage("system", SystemInfo::GetUserAgent().c_str());
 
@@ -265,6 +269,9 @@ void Application::Run() {
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
+            if (GetDeviceState() == kDeviceStateIdle) {
+                UpdateKidsEnglishConversationStatus();
+            }
             CheckKidsEnglishRecordingAutoStop();
 #endif
         
@@ -546,6 +553,10 @@ void Application::InitializeProtocol() {
     protocol_->OnIncomingJson([this, display](const cJSON* root) {
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
+        if (!cJSON_IsString(type)) {
+            ESP_LOGW(TAG, "Incoming JSON message missing string type");
+            return;
+        }
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
@@ -555,6 +566,7 @@ void Application::InitializeProtocol() {
                     if (GetDeviceState() == kDeviceStateConnecting) {
                         SetDeviceState(kDeviceStateListening);
                     }
+                    UpdateKidsEnglishConversationStatus("AI回复");
 #endif
                     SetDeviceState(kDeviceStateSpeaking);
                 });
@@ -609,6 +621,11 @@ void Application::InitializeProtocol() {
             auto payload = cJSON_GetObjectItem(root, "payload");
             if (cJSON_IsObject(payload)) {
                 McpServer::GetInstance().ParseMessage(payload);
+            }
+        } else if (strcmp(type->valuestring, "conversation") == 0) {
+            auto event = cJSON_GetObjectItem(root, "event");
+            if (cJSON_IsString(event) && strcmp(event->valuestring, "started") == 0) {
+                MarkKidsEnglishConversationStarted();
             }
         } else if (strcmp(type->valuestring, "system") == 0) {
             auto command = cJSON_GetObjectItem(root, "command");
@@ -755,33 +772,134 @@ void Application::ClearDebugMessages() {
     });
 }
 
-void Application::SendSimulatedRecording(const std::string& text) {
+void Application::ResetKidsEnglishDailyStatusIfNeeded() {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
-    if (kids_english_simulated_recording_task_handle_ != nullptr) {
-        Board::GetInstance().GetDisplay()->ShowNotification("模拟录音进行中");
+    time_t now = time(nullptr);
+    struct tm tm_now;
+    if (localtime_r(&now, &tm_now) == nullptr || tm_now.tm_year < 2025 - 1900) {
         return;
     }
+
+    if (kids_english_daily_conversation_yday_ < 0) {
+        kids_english_daily_conversation_yday_ = tm_now.tm_yday;
+        return;
+    }
+    if (kids_english_daily_conversation_yday_ != tm_now.tm_yday) {
+        kids_english_daily_conversation_yday_ = tm_now.tm_yday;
+        kids_english_daily_conversation_count_ = 0;
+    }
+#endif
+}
+
+void Application::UpdateKidsEnglishConversationStatus(const char* phase) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    ResetKidsEnglishDailyStatusIfNeeded();
+
+    char text[24];
+    if (phase != nullptr && phase[0] != '\0') {
+        snprintf(text, sizeof(text), "%s", phase);
+    } else {
+        switch (GetDeviceState()) {
+            case kDeviceStateConnecting:
+                snprintf(text, sizeof(text), "连接中");
+                break;
+            case kDeviceStateListening:
+                snprintf(text, sizeof(text), "听你说");
+                break;
+            case kDeviceStateSpeaking:
+                snprintf(text, sizeof(text),
+                         kids_english_submit_recording_task_handle_ != nullptr ? "提交中" : "AI回复");
+                break;
+            default:
+                snprintf(text, sizeof(text), "今日%d轮", kids_english_daily_conversation_count_);
+                break;
+        }
+    }
+    Board::GetInstance().GetDisplay()->SetConversationStatus(text);
+#else
+    (void)phase;
+#endif
+}
+
+void Application::MarkKidsEnglishConversationStarted() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    Schedule([this]() {
+        ResetKidsEnglishDailyStatusIfNeeded();
+        ++kids_english_daily_conversation_count_;
+        UpdateKidsEnglishConversationStatus();
+    });
+#endif
+}
+
+void Application::SendSimulatedRecording(const std::string& text) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
     if (kids_english_submit_recording_task_handle_ != nullptr) {
         Board::GetInstance().GetDisplay()->ShowNotification("录音提交中");
         return;
     }
 
-    auto task_text = new std::string(text);
-    BaseType_t created = xTaskCreate([](void* arg) {
-        std::unique_ptr<std::string> text(static_cast<std::string*>(arg));
-        auto& app = Application::GetInstance();
-        app.KidsEnglishSimulatedRecordingTask(*text);
-        app.kids_english_simulated_recording_task_handle_ = nullptr;
-        vTaskDelete(NULL);
-    }, "kids_sim_record", 4096 * 2, task_text, 3,
-       &kids_english_simulated_recording_task_handle_);
-    if (created != pdPASS) {
-        delete task_text;
-        kids_english_simulated_recording_task_handle_ = nullptr;
+    bool should_start_task = false;
+    size_t queued_segments = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        kids_english_simulated_recording_queue_.push_back(text);
+        kids_english_simulated_recording_active_ = true;
+        queued_segments = kids_english_simulated_recording_queue_.size();
+        should_start_task = kids_english_simulated_recording_task_handle_ == nullptr;
+    }
+    Board::GetInstance().GetDisplay()->ShowNotification(
+        queued_segments > 1 ? "模拟录音已加入队列" : "准备模拟录音", 2000);
+    if (!should_start_task) {
+        return;
+    }
+
+    if (!StartKidsEnglishSimulatedRecordingTask()) {
         Board::GetInstance().GetDisplay()->ShowNotification("模拟录音启动失败");
     }
 #else
     (void)text;
+#endif
+}
+
+bool Application::StartKidsEnglishSimulatedRecordingTask() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (kids_english_simulated_recording_task_handle_ != nullptr) {
+            return true;
+        }
+    }
+
+    BaseType_t created = xTaskCreate([](void* arg) {
+        auto& app = Application::GetInstance();
+        app.KidsEnglishSimulatedRecordingTask("");
+        bool has_more_segments = false;
+        {
+            std::lock_guard<std::mutex> lock(app.mutex_);
+            app.kids_english_simulated_recording_task_handle_ = nullptr;
+            has_more_segments = !app.kids_english_simulated_recording_queue_.empty();
+        }
+        if (has_more_segments) {
+            app.StartKidsEnglishSimulatedRecordingTask();
+        }
+        vTaskDelete(NULL);
+    }, "kids_sim_record", 4096 * 2, nullptr, 3,
+       &kids_english_simulated_recording_task_handle_);
+    if (created != pdPASS) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            kids_english_simulated_recording_queue_.clear();
+            kids_english_simulated_recording_pcm_.clear();
+            kids_english_simulated_recording_text_.clear();
+            kids_english_simulated_recording_active_ = false;
+            kids_english_simulated_submit_requested_ = false;
+        }
+        kids_english_simulated_recording_task_handle_ = nullptr;
+        return false;
+    }
+    return true;
+#else
+    return false;
 #endif
 }
 
@@ -990,6 +1108,39 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
 
 void Application::SubmitKidsEnglishRecording() {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
+    std::vector<int16_t> simulated_pcm;
+    bool wait_for_simulated_generation = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        bool has_simulated_recording = kids_english_simulated_recording_active_ ||
+                                       !kids_english_simulated_recording_pcm_.empty() ||
+                                       !kids_english_simulated_recording_queue_.empty();
+        if (has_simulated_recording) {
+            if (kids_english_simulated_recording_task_handle_ != nullptr ||
+                !kids_english_simulated_recording_queue_.empty()) {
+                kids_english_simulated_submit_requested_ = true;
+                wait_for_simulated_generation = true;
+            } else {
+                simulated_pcm = std::move(kids_english_simulated_recording_pcm_);
+                kids_english_simulated_recording_text_.clear();
+                kids_english_simulated_recording_active_ = false;
+                kids_english_simulated_submit_requested_ = false;
+            }
+        }
+    }
+    if (wait_for_simulated_generation) {
+        StopKidsEnglishRecordingDetection();
+        Board::GetInstance().GetDisplay()->ShowNotification("模拟录音生成中");
+        return;
+    }
+    if (!simulated_pcm.empty()) {
+        ESP_LOGI(TAG, "Kids English simulated PCM capture: samples=%u bytes=%u durationMs=%u",
+                 (unsigned)simulated_pcm.size(), (unsigned)(simulated_pcm.size() * sizeof(int16_t)),
+                 (unsigned)(simulated_pcm.size() * 1000 / 16000));
+        StartKidsEnglishRecordingSubmission(std::move(simulated_pcm), "simulated");
+        return;
+    }
+
     StopKidsEnglishRecordingDetection();
 
     if (kids_english_submit_recording_task_handle_ != nullptr) {
@@ -1021,6 +1172,14 @@ void Application::CancelKidsEnglishRecording(const char* reason) {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
     ESP_LOGI(TAG, "Canceling Kids English recording: %s", reason);
     StopKidsEnglishRecordingDetection();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        kids_english_simulated_recording_queue_.clear();
+        kids_english_simulated_recording_pcm_.clear();
+        kids_english_simulated_recording_text_.clear();
+        kids_english_simulated_recording_active_ = false;
+        kids_english_simulated_submit_requested_ = false;
+    }
     audio_service_.EnableVoiceProcessing(false);
     audio_service_.EndPcmCapture();
     while (audio_service_.PopPacketFromSendQueue()) {
@@ -1057,6 +1216,7 @@ bool Application::StartKidsEnglishRecordingSubmission(std::vector<int16_t>&& pcm
 
     auto task_pcm = new std::vector<int16_t>(std::move(pcm));
     SetDeviceState(kDeviceStateSpeaking);
+    UpdateKidsEnglishConversationStatus("提交中");
     BaseType_t created = xTaskCreate([](void* arg) {
         std::unique_ptr<std::vector<int16_t>> pcm(static_cast<std::vector<int16_t>*>(arg));
         auto& app = Application::GetInstance();
@@ -1160,6 +1320,14 @@ void Application::CheckKidsEnglishRecordingAutoStop() {
     if (!kids_english_recording_detector_active_ || GetDeviceState() != kDeviceStateListening) {
         return;
     }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (kids_english_simulated_recording_active_ &&
+            (kids_english_simulated_recording_task_handle_ != nullptr ||
+             !kids_english_simulated_recording_queue_.empty())) {
+            return;
+        }
+    }
 
     int64_t now_ms = esp_timer_get_time() / 1000;
     int64_t recording_ms = now_ms - kids_english_recording_started_at_ms_;
@@ -1237,11 +1405,7 @@ void Application::KidsEnglishSelfTestTask() {
 
 void Application::KidsEnglishSimulatedRecordingTask(std::string text) {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
-    Schedule([text]() {
-        auto display = Board::GetInstance().GetDisplay();
-        display->ShowNotification("准备模拟录音", 2000);
-        display->SetChatMessage("user", text.c_str());
-    });
+    (void)text;
 
     bool ok = false;
     if (protocol_ == nullptr) {
@@ -1254,34 +1418,133 @@ void Application::KidsEnglishSimulatedRecordingTask(std::string text) {
             Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
             if (!protocol_->OpenAudioChannel()) {
                 ESP_LOGE(TAG, "Simulated recording failed to open audio channel");
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    kids_english_simulated_recording_queue_.clear();
+                    kids_english_simulated_recording_pcm_.clear();
+                    kids_english_simulated_recording_text_.clear();
+                    kids_english_simulated_recording_active_ = false;
+                    kids_english_simulated_submit_requested_ = false;
+                }
                 SetDeviceState(kDeviceStateIdle);
             }
         }
 
         if (protocol_->IsAudioChannelOpened()) {
             audio_service_.WaitForPlaybackQueueEmpty();
-
-            std::vector<int16_t> pcm;
             SetListeningMode(kListeningModeManualStop);
-            if (kids_protocol->GenerateSimulatedRecordingPcm(text, pcm)) {
-                audio_service_.EnableVoiceProcessing(false);
-                audio_service_.EndPcmCapture();
-                while (audio_service_.PopPacketFromSendQueue()) {
+            audio_service_.EnableVoiceProcessing(false);
+            audio_service_.EndPcmCapture();
+            while (audio_service_.PopPacketFromSendQueue()) {
+            }
+
+            while (true) {
+                std::string next_text;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (kids_english_simulated_recording_queue_.empty()) {
+                        break;
+                    }
+                    next_text = std::move(kids_english_simulated_recording_queue_.front());
+                    kids_english_simulated_recording_queue_.pop_front();
                 }
-                ok = StartKidsEnglishRecordingSubmission(std::move(pcm), "simulated");
+
+                Schedule([next_text]() {
+                    auto display = Board::GetInstance().GetDisplay();
+                    display->SetChatMessage("user", next_text.c_str());
+                });
+
+                std::vector<int16_t> pcm;
+                if (!kids_protocol->GenerateSimulatedRecordingPcm(next_text, pcm)) {
+                    ESP_LOGE(TAG, "Simulated recording segment generation failed: %s",
+                             next_text.c_str());
+                    break;
+                }
+                if (!AppendKidsEnglishSimulatedRecordingSegment(next_text, std::move(pcm))) {
+                    ESP_LOGE(TAG, "Failed to append simulated recording segment: %s",
+                             next_text.c_str());
+                    break;
+                }
+                ok = true;
             }
         }
     }
 
     Schedule([ok]() {
         auto display = Board::GetInstance().GetDisplay();
-        display->ShowNotification(ok ? "模拟录音已提交" : "模拟录音失败", 3000);
+        display->ShowNotification(ok ? "模拟录音已加入" : "模拟录音失败", 3000);
         if (!ok) {
             display->SetChatMessage("system", "Simulated recording failed");
         }
     });
+
+    bool submit_requested = false;
+    std::vector<int16_t> pcm_to_submit;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        submit_requested = kids_english_simulated_submit_requested_;
+        if (submit_requested && kids_english_simulated_recording_queue_.empty()) {
+            kids_english_simulated_submit_requested_ = false;
+            pcm_to_submit = std::move(kids_english_simulated_recording_pcm_);
+            kids_english_simulated_recording_text_.clear();
+            kids_english_simulated_recording_active_ = false;
+        }
+    }
+    if (submit_requested && !pcm_to_submit.empty()) {
+        StartKidsEnglishRecordingSubmission(std::move(pcm_to_submit), "simulated");
+    }
+    if (!ok) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        kids_english_simulated_recording_queue_.clear();
+        kids_english_simulated_recording_pcm_.clear();
+        kids_english_simulated_recording_text_.clear();
+        kids_english_simulated_recording_active_ = false;
+        kids_english_simulated_submit_requested_ = false;
+    }
 #else
     (void)text;
+#endif
+}
+
+bool Application::AppendKidsEnglishSimulatedRecordingSegment(const std::string& text,
+                                                            std::vector<int16_t>&& pcm) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (pcm.empty()) {
+        return false;
+    }
+
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    size_t total_samples = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!kids_english_simulated_recording_pcm_.empty()) {
+            constexpr int kSimulatedSegmentGapSamples = 16000 / 4;
+            kids_english_simulated_recording_pcm_.insert(
+                kids_english_simulated_recording_pcm_.end(), kSimulatedSegmentGapSamples, 0);
+        }
+        kids_english_simulated_recording_pcm_.insert(kids_english_simulated_recording_pcm_.end(),
+                                                     pcm.begin(), pcm.end());
+        if (!kids_english_simulated_recording_text_.empty()) {
+            kids_english_simulated_recording_text_ += " ";
+        }
+        kids_english_simulated_recording_text_ += text;
+        kids_english_simulated_recording_active_ = true;
+        kids_english_recording_detector_active_ = true;
+        kids_english_recording_has_voice_ = true;
+        if (kids_english_recording_started_at_ms_ == 0) {
+            kids_english_recording_started_at_ms_ = now_ms;
+        }
+        kids_english_recording_silence_started_at_ms_ = now_ms;
+        total_samples = kids_english_simulated_recording_pcm_.size();
+    }
+
+    ESP_LOGI(TAG, "Appended simulated Kids English recording: text=%s totalSamples=%u durationMs=%u",
+             text.c_str(), (unsigned)total_samples, (unsigned)(total_samples * 1000 / 16000));
+    return true;
+#else
+    (void)text;
+    (void)pcm;
+    return false;
 #endif
 }
 
@@ -1299,6 +1562,7 @@ void Application::HandleStateChangedEvent() {
         case kDeviceStateIdle:
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
             StopKidsEnglishRecordingDetection();
+            UpdateKidsEnglishConversationStatus();
 #endif
             display->SetStatus(Lang::Strings::STANDBY);
             display->ClearChatMessages();  // Clear messages first
@@ -1307,13 +1571,28 @@ void Application::HandleStateChangedEvent() {
             audio_service_.EnableWakeWordDetection(true);
             break;
         case kDeviceStateConnecting:
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+            UpdateKidsEnglishConversationStatus("连接中");
+#endif
             display->SetStatus(Lang::Strings::CONNECTING);
             display->SetEmotion("neutral");
             display->SetChatMessage("system", "");
             break;
-        case kDeviceStateListening:
+        case kDeviceStateListening: {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+            UpdateKidsEnglishConversationStatus("听你说");
+#endif
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+            bool using_simulated_recording = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                using_simulated_recording = kids_english_simulated_recording_active_ ||
+                                            kids_english_simulated_recording_task_handle_ != nullptr ||
+                                            !kids_english_simulated_recording_queue_.empty();
+            }
+#endif
 
             // Make sure the audio processor is running
             if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
@@ -1327,13 +1606,18 @@ void Application::HandleStateChangedEvent() {
                 while (audio_service_.PopPacketFromSendQueue());
                 protocol_->SendStartListening(listening_mode_);
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
-                audio_service_.BeginPcmCapture();
-#endif
-                audio_service_.EnableVoiceProcessing(true);
-#if CONFIG_USE_KIDS_ENGLISH_SERVER
-                if (listening_mode_ == kListeningModeAutoStop) {
-                    StartKidsEnglishRecordingDetection();
+                if (using_simulated_recording) {
+                    audio_service_.EndPcmCapture();
+                    audio_service_.EnableVoiceProcessing(false);
+                } else {
+                    audio_service_.BeginPcmCapture();
+                    audio_service_.EnableVoiceProcessing(true);
+                    if (listening_mode_ == kListeningModeAutoStop) {
+                        StartKidsEnglishRecordingDetection();
+                    }
                 }
+#else
+                audio_service_.EnableVoiceProcessing(true);
 #endif
             }
 
@@ -1351,9 +1635,11 @@ void Application::HandleStateChangedEvent() {
                 audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
             }
             break;
+        }
         case kDeviceStateSpeaking:
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
             StopKidsEnglishRecordingDetection();
+            UpdateKidsEnglishConversationStatus();
 #endif
             display->SetStatus(Lang::Strings::SPEAKING);
 

@@ -39,8 +39,10 @@ private:
         std::string screen_cue;
         std::string audio_format;
         std::string tts_audio_url;
+        std::string tts_text;
         std::string request_id;
         bool should_continue_listening = true;
+        bool has_tts_text = false;
         int asr_duration_ms = -1;
         int llm_duration_ms = -1;
         int tts_duration_ms = -1;
@@ -51,8 +53,10 @@ private:
 
     struct StandaloneTtsResponse {
         std::string tts_audio_url;
+        std::string tts_text;
         std::string audio_format;
         std::string request_id;
+        bool has_tts_text = false;
         int tts_duration_ms = -1;
         int total_duration_ms = -1;
         bool provider_fallback = false;
@@ -125,12 +129,15 @@ private:
     bool ReadHttpBody(Http* http, std::string& body);
     bool HandleConversationResponse(const ConversationResponse& response, const char* fallback_text,
                                     bool wait_for_playback = false);
+    bool HandleStandaloneTtsResponse(const StandaloneTtsResponse& response,
+                                     bool wait_for_playback = false);
     bool IsConversationEndedError(const cJSON* root) const;
     void EmitTtsMessage(const char* state, const char* text = nullptr,
                         bool continue_listening = true);
     void EmitSttMessage(const std::string& text);
     void EmitAssistantMessage(const std::string& text);
     void EmitEmotion(const char* emotion);
+    void EmitConversationStarted();
     void DispatchJson(cJSON* root);
     std::string GetErrorMessage(const cJSON* root) const;
     static std::string TrimTrailingSlash(std::string url);

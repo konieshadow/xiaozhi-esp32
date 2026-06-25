@@ -18,6 +18,7 @@ public:
     virtual ~LvglDisplay();
 
     virtual void SetStatus(const char* status);
+    virtual void SetConversationStatus(const char* status);
     virtual void ShowNotification(const char* notification, int duration_ms = 3000);
     virtual void ShowNotification(const std::string &notification, int duration_ms = 3000);
     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image);
@@ -35,6 +36,7 @@ protected:
     lv_obj_t *mute_label_ = nullptr;
     lv_obj_t *battery_label_ = nullptr;
     lv_obj_t *battery_voltage_label_ = nullptr;
+    lv_obj_t *conversation_status_label_ = nullptr;
     lv_obj_t* low_battery_popup_ = nullptr;
     lv_obj_t* low_battery_label_ = nullptr;
     

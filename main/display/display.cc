@@ -24,6 +24,10 @@ void Display::SetStatus(const char* status) {
     ESP_LOGW(TAG, "SetStatus: %s", status);
 }
 
+void Display::SetConversationStatus(const char* status) {
+    ESP_LOGW(TAG, "SetConversationStatus: %s", status);
+}
+
 void Display::ShowNotification(const std::string &notification, int duration_ms) {
     ShowNotification(notification.c_str(), duration_ms);
 }

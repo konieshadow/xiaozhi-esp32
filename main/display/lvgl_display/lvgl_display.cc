@@ -65,6 +65,9 @@ LvglDisplay::~LvglDisplay() {
     if (battery_voltage_label_ != nullptr) {
         lv_obj_del(battery_voltage_label_);
     }
+    if (conversation_status_label_ != nullptr) {
+        lv_obj_del(conversation_status_label_);
+    }
     if( low_battery_popup_ != nullptr ) {
         lv_obj_del(low_battery_popup_);
     }
@@ -89,6 +92,23 @@ void LvglDisplay::SetStatus(const char* status) {
     lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
 
     last_status_update_time_ = std::chrono::system_clock::now();
+}
+
+void LvglDisplay::SetConversationStatus(const char* status) {
+    if (!setup_ui_called_) {
+        ESP_LOGW(TAG, "SetConversationStatus('%s') called before SetupUI() - message will be lost!",
+                 status);
+    }
+    DisplayLockGuard lock(this);
+    if (conversation_status_label_ == nullptr) {
+        if (setup_ui_called_) {
+            ESP_LOGW(TAG,
+                     "SetConversationStatus('%s') failed: conversation_status_label_ is nullptr",
+                     status);
+        }
+        return;
+    }
+    lv_label_set_text(conversation_status_label_, status == nullptr ? "" : status);
 }
 
 void LvglDisplay::ShowNotification(const std::string &notification, int duration_ms) {
@@ -173,17 +193,18 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
             icon = levels[battery_level / 20];
         }
         DisplayLockGuard lock(this);
-        if (battery_label_ != nullptr && battery_icon_ != icon) {
-            battery_icon_ = icon;
-            lv_label_set_text(battery_label_, battery_icon_);
-        }
-        if (battery_voltage_label_ != nullptr) {
+        if (battery_label_ != nullptr || battery_voltage_label_ != nullptr) {
+            DisplayLockGuard lock(this);
+            if (battery_label_ != nullptr && battery_icon_ != icon) {
+                battery_icon_ = icon;
+                lv_label_set_text(battery_label_, battery_icon_);
+            }
             float voltage = 0.0f;
-            if (board.GetBatteryVoltage(voltage)) {
+            if (battery_voltage_label_ != nullptr && board.GetBatteryVoltage(voltage)) {
                 char text[8];
                 snprintf(text, sizeof(text), "%.1f", voltage);
                 lv_label_set_text(battery_voltage_label_, text);
-            } else {
+            } else if (battery_voltage_label_ != nullptr) {
                 lv_label_set_text(battery_voltage_label_, "");
             }
         }
