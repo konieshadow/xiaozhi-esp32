@@ -124,10 +124,14 @@ private:
     bool ws_waiting_initial_audio_ = false;
     bool ws_output_audio_active_ = false;
     bool ws_output_audio_finalized_ = false;
+    bool ws_tts_playback_started_ = false;
+    bool ws_url_audio_in_progress_ = false;
     std::string ws_output_audio_transport_;
     std::string ws_output_audio_format_;
     std::string ws_output_audio_url_;
     std::string ws_output_audio_buffer_;
+    int ws_output_audio_sample_rate_hz_ = 16000;
+    int ws_output_audio_channels_ = 1;
     std::vector<std::unique_ptr<AudioStreamPacket>> pending_audio_;
     std::vector<int16_t> pending_pcm_;
     mutable std::mutex mutex_;
@@ -192,7 +196,9 @@ private:
                                     bool wait_for_playback = false);
     bool HandleWsAudioPlayback();
     bool HandleWsAudioUrl(const std::string& url);
+    void HandleWsAudioUrlAsync(const std::string& url);
     bool HandleWsAudioBuffer();
+    bool PushWsPcmAudioChunk(const char* payload, size_t len, int sample_rate);
     std::string ResolveAudioUrl(const std::string& url) const;
     std::string RedactUrlForLog(const std::string& url) const;
     void HandleWsTextFrame(const char* data, size_t len);
@@ -202,6 +208,7 @@ private:
     void HandleWsAssistantAudioStart(const cJSON* root);
     void HandleWsAssistantAudioEnd(const cJSON* root);
     void HandleWsTurnComplete(const cJSON* root);
+    void HandleWsServerFallback(const cJSON* root);
     void HandleWsError(const cJSON* root);
     void MarkWebSocketFallback();
     bool HandleStandaloneTtsResponse(const StandaloneTtsResponse& response,
