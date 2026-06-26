@@ -8,6 +8,8 @@
 #include <esp_mn_models.h>
 #include <esp_mn_speech_commands.h>
 #include <cJSON.h>
+#include <cmath>
+#include <cstdlib>
 
 #define TAG "CustomWakeWord"
 
@@ -87,7 +89,13 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
     commands_.clear();
 
     if (models_list == nullptr) {
+#if defined(CONFIG_SR_MN_CN_NONE) && \
+    (defined(CONFIG_SR_MN_EN_MULTINET5_SINGLE_RECOGNITION_QUANT8) || \
+     defined(CONFIG_SR_MN_EN_MULTINET6_QUANT) || defined(CONFIG_SR_MN_EN_MULTINET7_QUANT))
+        language_ = "en";
+#else
         language_ = "cn";
+#endif
         models_ = esp_srmodel_init("model");
 #ifdef CONFIG_CUSTOM_WAKE_WORD
         threshold_ = CONFIG_CUSTOM_WAKE_WORD_THRESHOLD / 100.0f;
@@ -133,7 +141,15 @@ void CustomWakeWord::OnWakeWordDetected(std::function<void(const std::string& wa
 }
 
 void CustomWakeWord::Start() {
+    debug_feed_chunks_ = 0;
+    debug_timeout_count_ = 0;
+    debug_peak_ = 0;
+    debug_square_sum_ = 0;
+    debug_sample_count_ = 0;
+    debug_last_log_time_us_ = esp_timer_get_time();
     running_ = true;
+    ESP_LOGI(TAG, "Wake word listening started: language=%s, threshold=%.2f, commands=%u",
+             language_.c_str(), threshold_, commands_.size());
 }
 
 void CustomWakeWord::Stop() {
@@ -167,14 +183,33 @@ void CustomWakeWord::Feed(const std::vector<int16_t>& data) {
     while (input_buffer_.size() >= chunksize) {
         std::vector<int16_t> chunk(input_buffer_.begin(), input_buffer_.begin() + chunksize);
         StoreWakeWordData(chunk);
+
+        int32_t chunk_peak = 0;
+        uint64_t chunk_square_sum = 0;
+        for (int16_t sample : chunk) {
+            int32_t abs_sample = std::abs(static_cast<int32_t>(sample));
+            if (abs_sample > chunk_peak) {
+                chunk_peak = abs_sample;
+            }
+            chunk_square_sum += static_cast<int64_t>(sample) * sample;
+        }
+        debug_feed_chunks_++;
+        debug_sample_count_ += chunk.size();
+        debug_square_sum_ += chunk_square_sum;
+        if (chunk_peak > debug_peak_) {
+            debug_peak_ = chunk_peak;
+        }
         
         esp_mn_state_t mn_state = multinet_->detect(multinet_model_data_, chunk.data());
         
         if (mn_state == ESP_MN_STATE_DETECTED) {
             esp_mn_results_t *mn_result = multinet_->get_results(multinet_model_data_);
             for (int i = 0; i < mn_result->num && running_; i++) {
-                ESP_LOGI(TAG, "Custom wake word detected: command_id=%d, string=%s, prob=%f", 
-                        mn_result->command_id[i], mn_result->string, mn_result->prob[i]);
+                ESP_LOGI(TAG,
+                         "Custom wake word detected: command_id=%d, string=%s, prob=%f, peak=%ld, chunks=%lu, timeouts=%lu",
+                         mn_result->command_id[i], mn_result->string, mn_result->prob[i],
+                         static_cast<long>(debug_peak_), static_cast<unsigned long>(debug_feed_chunks_),
+                         static_cast<unsigned long>(debug_timeout_count_));
                 auto& command = commands_[mn_result->command_id[i] - 1];
                 if (command.action == "wake") {
                     last_detected_wake_word_ = command.text;
@@ -188,8 +223,28 @@ void CustomWakeWord::Feed(const std::vector<int16_t>& data) {
             }
             multinet_->clean(multinet_model_data_);
         } else if (mn_state == ESP_MN_STATE_TIMEOUT) {
-            ESP_LOGD(TAG, "Command word detection timeout, cleaning state");
+            debug_timeout_count_++;
+            ESP_LOGI(TAG, "Command word detection timeout: chunks=%lu, peak=%ld, timeouts=%lu",
+                     static_cast<unsigned long>(debug_feed_chunks_), static_cast<long>(debug_peak_),
+                     static_cast<unsigned long>(debug_timeout_count_));
             multinet_->clean(multinet_model_data_);
+        }
+
+        int64_t now = esp_timer_get_time();
+        if (now - debug_last_log_time_us_ >= 1000000) {
+            double rms = 0;
+            if (debug_sample_count_ > 0) {
+                rms = std::sqrt(static_cast<double>(debug_square_sum_) / debug_sample_count_);
+            }
+            ESP_LOGI(TAG,
+                     "Wake word feed: chunks=%lu, buffered=%u, peak=%ld, rms=%.1f, timeouts=%lu, running=%d",
+                     static_cast<unsigned long>(debug_feed_chunks_),
+                     static_cast<unsigned>(input_buffer_.size()), static_cast<long>(debug_peak_), rms,
+                     static_cast<unsigned long>(debug_timeout_count_), running_.load());
+            debug_peak_ = 0;
+            debug_square_sum_ = 0;
+            debug_sample_count_ = 0;
+            debug_last_log_time_us_ = now;
         }
         
         if (!running_) {

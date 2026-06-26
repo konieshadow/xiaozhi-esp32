@@ -55,6 +55,12 @@ private:
     std::atomic<bool> running_ = false;
     std::vector<int16_t> input_buffer_;
     std::mutex input_buffer_mutex_;
+    uint32_t debug_feed_chunks_ = 0;
+    uint32_t debug_timeout_count_ = 0;
+    int32_t debug_peak_ = 0;
+    uint64_t debug_square_sum_ = 0;
+    uint32_t debug_sample_count_ = 0;
+    int64_t debug_last_log_time_us_ = 0;
 
     TaskHandle_t wake_word_encode_task_ = nullptr;
     StaticTask_t* wake_word_encode_task_buffer_ = nullptr;
