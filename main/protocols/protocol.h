@@ -73,6 +73,9 @@ public:
     virtual void SendStopListening();
     virtual void SendAbortSpeaking(AbortReason reason);
     virtual void SendMcpMessage(const std::string& message);
+    virtual void OnPcmPlaybackQueued(size_t samples, size_t queue_depth) {}
+    virtual void OnAudioPlaybackStarted(size_t samples, size_t remaining_queue_depth) {}
+    virtual void OnAudioPlaybackFinished(size_t samples, bool queue_drained) {}
 
 protected:
     std::function<void(const cJSON* root)> on_incoming_json_;
@@ -95,4 +98,3 @@ protected:
 };
 
 #endif // PROTOCOL_H
-

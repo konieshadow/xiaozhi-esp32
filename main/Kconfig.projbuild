@@ -880,16 +880,19 @@ config KIDS_ENGLISH_DEVICE_SECRET
         Development device secret used to sign kids English HTTP requests.
 
 config KIDS_ENGLISH_AUTO_SELF_TEST
-    bool "Automatically run Kids English HTTP self-test"
-    default n
+	bool "Automatically run Kids English HTTP self-test"
+	default n
     depends on USE_KIDS_ENGLISH_SERVER
     help
-        Run a one-shot unattended hardware integration test after networking
-        and protocol initialization. The test calls /health, /api/device/hello,
-        generates real speech audio through /api/device/tts, verifies it with
-        /api/device/asr, starts a conversation, uploads the same 16 kHz mono
-        PCM WAV, downloads and plays TTS, ends the conversation, and verifies
-        the expected 409 response for an upload after end.
+        When enabled, run a one-shot unattended hardware integration test after
+        networking and protocol initialization. The test calls /health,
+        /api/device/hello, generates real speech audio through /api/device/tts,
+        verifies it with /api/device/asr, starts a conversation, then runs
+        multiple simulated conversation turns. Each turn waits for the assistant
+        reply audio to finish before generating the next simulated recording,
+        then ends the conversation and verifies the expected 409 response for an
+        upload after end. When disabled, the same self-test remains available
+        from the Kids English debug menu.
 
 config KIDS_ENGLISH_INITIAL_SILENCE_TIMEOUT_MS
     int "Kids English initial silence timeout (ms)"

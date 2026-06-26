@@ -103,6 +103,36 @@ private:
         int output_channels = 1;
     };
 
+    struct WsTurnMetrics {
+        bool active = false;
+        bool turn_complete = false;
+        bool fallback_requested = false;
+        bool playback_started_sent = false;
+        bool playback_finished_sent = false;
+        bool output_audio_active = false;
+        std::string fallback_reason;
+        std::string conversation_id;
+        std::string client_turn_id;
+        std::string server_turn_id;
+        int64_t turn_begin_ms = 0;
+        int64_t audio_submitted_ms = 0;
+        int64_t assistant_audio_start_ms = 0;
+        int64_t first_binary_frame_ms = 0;
+        int64_t first_pcm_queue_ms = 0;
+        int64_t playback_started_ms = 0;
+        int64_t assistant_audio_end_ms = 0;
+        int64_t binary_end_ms = 0;
+        int64_t turn_complete_ms = 0;
+        int64_t playback_finished_ms = 0;
+        size_t audio_bytes = 0;
+        size_t audio_chunks = 0;
+        size_t queue_peak_depth = 0;
+        size_t queue_min_depth = 0;
+        size_t playback_chunks = 0;
+        size_t playback_samples = 0;
+        uint32_t underruns = 0;
+    };
+
     std::string base_url_;
     std::string device_id_;
     std::string device_secret_;
@@ -124,14 +154,22 @@ private:
     bool ws_waiting_initial_audio_ = false;
     bool ws_output_audio_active_ = false;
     bool ws_output_audio_finalized_ = false;
+    bool ws_output_audio_end_received_ = false;
+    bool ws_output_playback_pending_ = false;
+    bool ws_output_playback_started_sent_ = false;
+    bool ws_output_playback_finished_sent_ = false;
+    bool ws_output_playback_queue_drained_ = false;
     bool ws_tts_playback_started_ = false;
     bool ws_url_audio_in_progress_ = false;
     std::string ws_output_audio_transport_;
     std::string ws_output_audio_format_;
     std::string ws_output_audio_url_;
+    std::string ws_output_audio_conversation_id_;
+    std::string ws_output_audio_turn_id_;
     std::string ws_output_audio_buffer_;
     int ws_output_audio_sample_rate_hz_ = 16000;
     int ws_output_audio_channels_ = 1;
+    WsTurnMetrics ws_turn_metrics_;
     std::vector<std::unique_ptr<AudioStreamPacket>> pending_audio_;
     std::vector<int16_t> pending_pcm_;
     mutable std::mutex mutex_;
@@ -169,6 +207,8 @@ private:
     bool SendWsSessionOpen();
     bool SendWsConversationStart(const char* trigger);
     bool SendWsConversationEnd(const std::string& conversation_id, const char* reason);
+    bool SendWsPlaybackEvent(const char* type, const std::string& conversation_id,
+                             const std::string& turn_id);
     bool SendWsTextFrame(const std::string& text);
     bool SendWsAudioFrame(const uint8_t* payload, size_t len, bool end_of_segment);
     uint32_t NextWsSeq();
@@ -199,6 +239,10 @@ private:
     void HandleWsAudioUrlAsync(const std::string& url);
     bool HandleWsAudioBuffer();
     bool PushWsPcmAudioChunk(const char* payload, size_t len, int sample_rate);
+    void ResetWsTurnMetricsLocked();
+    void LogWsTurnMetricsLocked(const char* reason) const;
+    void TrySendWsPlaybackFinished(const char* reason);
+    int64_t NowMs() const;
     std::string ResolveAudioUrl(const std::string& url) const;
     std::string RedactUrlForLog(const std::string& url) const;
     void HandleWsTextFrame(const char* data, size_t len);
@@ -213,6 +257,9 @@ private:
     void MarkWebSocketFallback();
     bool HandleStandaloneTtsResponse(const StandaloneTtsResponse& response,
                                      bool wait_for_playback = false);
+    void OnPcmPlaybackQueued(size_t samples, size_t queue_depth) override;
+    void OnAudioPlaybackStarted(size_t samples, size_t remaining_queue_depth) override;
+    void OnAudioPlaybackFinished(size_t samples, bool queue_drained) override;
     bool IsConversationEndedError(const cJSON* root) const;
     void EmitTtsMessage(const char* state, const char* text = nullptr,
                         bool continue_listening = true);

@@ -119,6 +119,7 @@ public:
     void ShowDebugInfo();
     void ClearDebugMessages();
     void SendSimulatedRecording(const std::string& text);
+    void StartKidsEnglishSelfTest();
     void MarkKidsEnglishConversationStarted();
     
     /**

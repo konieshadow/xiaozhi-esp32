@@ -689,6 +689,9 @@ void LcdDisplay::RenderDebugHome() {
             display->SetDebugMenuView(DebugMenuView::kSimulatedRecording);
         }
     });
+    CreateDebugAction(debug_content_, FONT_AWESOME_CIRCLE_CHECK, "执行自测", [](lv_event_t*) {
+        Application::GetInstance().StartKidsEnglishSelfTest();
+    });
     CreateDebugAction(debug_content_, FONT_AWESOME_TRASH, "清空消息", [](lv_event_t*) {
         Application::GetInstance().ClearDebugMessages();
     });

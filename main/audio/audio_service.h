@@ -80,6 +80,9 @@ struct AudioServiceCallbacks {
     std::function<void(const std::string&)> on_wake_word_detected;
     std::function<void(bool)> on_vad_change;
     std::function<void(void)> on_audio_testing_queue_full;
+    std::function<void(size_t, size_t)> on_playback_queue_pushed;
+    std::function<void(size_t, size_t)> on_playback_started;
+    std::function<void(size_t, bool)> on_playback_finished;
 };
 
 

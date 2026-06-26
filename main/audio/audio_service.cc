@@ -305,6 +305,8 @@ void AudioService::AudioOutputTask() {
         auto task = std::move(audio_playback_queue_.front());
         audio_playback_queue_.pop_front();
         playback_active_ = true;
+        size_t playback_samples = task->pcm.size();
+        size_t remaining_queue_depth = audio_playback_queue_.size();
         audio_queue_cv_.notify_all();
         lock.unlock();
 
@@ -314,6 +316,9 @@ void AudioService::AudioOutputTask() {
             codec_->EnableOutput(true);
         }
 
+        if (callbacks_.on_playback_started) {
+            callbacks_.on_playback_started(playback_samples, remaining_queue_depth);
+        }
         codec_->OutputData(task->pcm);
 
         /* Update the last output time */
@@ -322,6 +327,8 @@ void AudioService::AudioOutputTask() {
 
         lock.lock();
         playback_active_ = false;
+        bool queue_drained =
+            audio_decode_queue_.empty() && audio_playback_queue_.empty() && !playback_active_;
 
 #if CONFIG_USE_SERVER_AEC
         /* Record the timestamp for server AEC */
@@ -331,6 +338,9 @@ void AudioService::AudioOutputTask() {
 #endif
         audio_queue_cv_.notify_all();
         lock.unlock();
+        if (callbacks_.on_playback_finished) {
+            callbacks_.on_playback_finished(playback_samples, queue_drained);
+        }
     }
 
     ESP_LOGW(TAG, "Audio output task stopped");
@@ -582,11 +592,19 @@ void AudioService::PushPcmToPlaybackQueue(std::vector<int16_t>&& pcm, int sample
 
     auto task = std::make_unique<AudioTask>();
     task->type = kAudioTaskTypeDecodeToPlaybackQueue;
+    size_t playback_samples = pcm.size();
     task->pcm = std::move(pcm);
 
-    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
-    audio_playback_queue_.push_back(std::move(task));
-    audio_queue_cv_.notify_all();
+    size_t queue_depth = 0;
+    {
+        std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+        audio_playback_queue_.push_back(std::move(task));
+        queue_depth = audio_playback_queue_.size();
+        audio_queue_cv_.notify_all();
+    }
+    if (callbacks_.on_playback_queue_pushed) {
+        callbacks_.on_playback_queue_pushed(playback_samples, queue_depth);
+    }
 }
 
 void AudioService::EncodeWakeWord() {

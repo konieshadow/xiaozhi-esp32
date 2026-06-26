@@ -32,6 +32,8 @@ rtk proxy sh -lc 'IDF_PATH=$HOME/.espressif/v5.5.2/esp-idf IDF_PYTHON_ENV_PATH=$
 
 For connected hardware, first verify the serial device, usually with `rtk ls /dev/cu.usbmodem*`. The locally used Waveshare ESP32-S3-Touch-LCD-1.85 has appeared as `/dev/cu.usbmodem1201`; use `idf.py -p /dev/cu.usbmodem1201 flash` only after confirming it still matches.
 
+Keep `KIDS_ENGLISH_AUTO_SELF_TEST` disabled for normal development, formal firmware builds, and formal device flashes so ordinary boots do not automatically run the Kids English self-test. Run the self-test manually from the Kids English debug menu when possible; enable `KIDS_ENGLISH_AUTO_SELF_TEST` only for explicit temporary integration-test firmware, and disable it again after testing.
+
 ## Coding Style & Naming Conventions
 
 C++ uses the repository `.clang-format`, based on Google style: 4-space indentation, 100-column limit, attached braces, sorted includes, and left-aligned pointers. Run formatting before submitting:

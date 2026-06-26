@@ -137,6 +137,21 @@ void Application::Initialize() {
 #endif
         xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
     };
+    callbacks.on_playback_queue_pushed = [this](size_t samples, size_t queue_depth) {
+        if (protocol_) {
+            protocol_->OnPcmPlaybackQueued(samples, queue_depth);
+        }
+    };
+    callbacks.on_playback_started = [this](size_t samples, size_t remaining_queue_depth) {
+        if (protocol_) {
+            protocol_->OnAudioPlaybackStarted(samples, remaining_queue_depth);
+        }
+    };
+    callbacks.on_playback_finished = [this](size_t samples, bool queue_drained) {
+        if (protocol_) {
+            protocol_->OnAudioPlaybackFinished(samples, queue_drained);
+        }
+    };
     audio_service_.SetCallbacks(callbacks);
 
     // Add state change listeners
@@ -903,6 +918,33 @@ void Application::SendSimulatedRecording(const std::string& text) {
 #endif
 }
 
+void Application::StartKidsEnglishSelfTest() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (kids_english_self_test_task_handle_ != nullptr) {
+        ESP_LOGW(TAG, "Kids English self-test task already running");
+        Board::GetInstance().GetDisplay()->ShowNotification("自测已在运行", 2000);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Scheduling Kids English hardware self-test");
+    auto created = xTaskCreate([](void* arg) {
+        Application* app = static_cast<Application*>(arg);
+        app->KidsEnglishSelfTestTask();
+        app->kids_english_self_test_task_handle_ = nullptr;
+        vTaskDelete(NULL);
+    }, "kids_self_test", 4096 * 2, this, 3, &kids_english_self_test_task_handle_);
+    if (created != pdPASS) {
+        kids_english_self_test_task_handle_ = nullptr;
+        ESP_LOGE(TAG, "Failed to create Kids English self-test task");
+        Board::GetInstance().GetDisplay()->ShowNotification("自测启动失败", 2000);
+        return;
+    }
+    Board::GetInstance().GetDisplay()->ShowNotification("自测开始", 2000);
+#else
+    ESP_LOGW(TAG, "Kids English self-test unavailable: server support disabled");
+#endif
+}
+
 bool Application::StartKidsEnglishSimulatedRecordingTask() {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
     {
@@ -1424,27 +1466,18 @@ void Application::CheckKidsEnglishRecordingAutoStop() {
 
 void Application::MaybeStartKidsEnglishSelfTest() {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER && CONFIG_KIDS_ENGLISH_AUTO_SELF_TEST
-    if (kids_english_self_test_task_handle_ != nullptr) {
-        ESP_LOGW(TAG, "Kids English self-test task already running");
-        return;
-    }
-    ESP_LOGI(TAG, "Scheduling unattended Kids English hardware self-test");
-    xTaskCreate([](void* arg) {
-        Application* app = static_cast<Application*>(arg);
-        app->KidsEnglishSelfTestTask();
-        app->kids_english_self_test_task_handle_ = nullptr;
-        vTaskDelete(NULL);
-    }, "kids_self_test", 4096 * 2, this, 3, &kids_english_self_test_task_handle_);
+    ESP_LOGI(TAG, "KIDS_ENGLISH_AUTO_SELF_TEST enabled; starting Kids English self-test");
+    StartKidsEnglishSelfTest();
 #endif
 }
 
 void Application::KidsEnglishSelfTestTask() {
-#if CONFIG_USE_KIDS_ENGLISH_SERVER && CONFIG_KIDS_ENGLISH_AUTO_SELF_TEST
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
     vTaskDelay(pdMS_TO_TICKS(1500));
     Schedule([]() {
         auto display = Board::GetInstance().GetDisplay();
         display->SetStatus("Kids English test");
-        display->SetChatMessage("system", "Running unattended Kids English self-test");
+        display->SetChatMessage("system", "Running Kids English self-test");
     });
 
     bool passed = false;
