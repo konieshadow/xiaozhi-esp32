@@ -23,10 +23,23 @@
 #define TAG "Application"
 
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
+#ifndef CONFIG_KIDS_ENGLISH_INITIAL_SILENCE_TIMEOUT_MS
+#define CONFIG_KIDS_ENGLISH_INITIAL_SILENCE_TIMEOUT_MS 7000
+#endif
+#ifndef CONFIG_KIDS_ENGLISH_END_SILENCE_TIMEOUT_MS
+#define CONFIG_KIDS_ENGLISH_END_SILENCE_TIMEOUT_MS 800
+#endif
+#ifndef CONFIG_KIDS_ENGLISH_MAX_RECORDING_DURATION_MS
+#define CONFIG_KIDS_ENGLISH_MAX_RECORDING_DURATION_MS 10000
+#endif
+
 namespace {
-constexpr int64_t kKidsEnglishInitialSilenceTimeoutMs = 7000;
-constexpr int64_t kKidsEnglishEndSilenceTimeoutMs = 1200;
-constexpr int64_t kKidsEnglishMaxRecordingDurationMs = 10000;
+constexpr int64_t kKidsEnglishInitialSilenceTimeoutMs =
+    CONFIG_KIDS_ENGLISH_INITIAL_SILENCE_TIMEOUT_MS;
+constexpr int64_t kKidsEnglishEndSilenceTimeoutMs = CONFIG_KIDS_ENGLISH_END_SILENCE_TIMEOUT_MS;
+constexpr int64_t kKidsEnglishMaxRecordingDurationMs =
+    CONFIG_KIDS_ENGLISH_MAX_RECORDING_DURATION_MS;
+constexpr int64_t kKidsEnglishRecordingCheckIntervalMs = 100;
 }  // namespace
 #endif
 
@@ -55,9 +68,31 @@ Application::Application() {
         .skip_unhandled_events = true
     };
     esp_timer_create(&clock_timer_args, &clock_timer_handle_);
+
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    esp_timer_create_args_t kids_recording_timer_args = {
+        .callback = [](void* arg) {
+            Application* app = (Application*)arg;
+            xEventGroupSetBits(app->event_group_, MAIN_EVENT_KIDS_RECORDING_CHECK);
+        },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "kids_recording_timer",
+        .skip_unhandled_events = true
+    };
+    esp_timer_create(&kids_recording_timer_args, &kids_english_recording_timer_handle_);
+#endif
 }
 
 Application::~Application() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (kids_english_recording_timer_handle_ != nullptr) {
+        if (esp_timer_is_active(kids_english_recording_timer_handle_)) {
+            esp_timer_stop(kids_english_recording_timer_handle_);
+        }
+        esp_timer_delete(kids_english_recording_timer_handle_);
+    }
+#endif
     if (clock_timer_handle_ != nullptr) {
         esp_timer_stop(clock_timer_handle_);
         esp_timer_delete(clock_timer_handle_);
@@ -197,6 +232,7 @@ void Application::Run() {
         MAIN_EVENT_TOGGLE_CHAT |
         MAIN_EVENT_START_LISTENING |
         MAIN_EVENT_STOP_LISTENING |
+        MAIN_EVENT_KIDS_RECORDING_CHECK |
         MAIN_EVENT_ACTIVATION_DONE |
         MAIN_EVENT_STATE_CHANGED;
 
@@ -263,6 +299,12 @@ void Application::Run() {
                 task();
             }
         }
+
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+        if (bits & MAIN_EVENT_KIDS_RECORDING_CHECK) {
+            CheckKidsEnglishRecordingAutoStop();
+        }
+#endif
 
         if (bits & MAIN_EVENT_CLOCK_TICK) {
             clock_ticks_++;
@@ -1276,6 +1318,7 @@ void Application::StartKidsEnglishRecordingDetection() {
     kids_english_recording_has_voice_ = false;
     kids_english_recording_started_at_ms_ = now_ms;
     kids_english_recording_silence_started_at_ms_ = now_ms;
+    StartKidsEnglishRecordingCheckTimer();
     ESP_LOGI(TAG, "Kids English recording detector started");
 #endif
 }
@@ -1289,7 +1332,32 @@ void Application::StopKidsEnglishRecordingDetection() {
     kids_english_recording_has_voice_ = false;
     kids_english_recording_started_at_ms_ = 0;
     kids_english_recording_silence_started_at_ms_ = 0;
+    StopKidsEnglishRecordingCheckTimer();
     ESP_LOGI(TAG, "Kids English recording detector stopped");
+#endif
+}
+
+void Application::StartKidsEnglishRecordingCheckTimer() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (kids_english_recording_timer_handle_ == nullptr) {
+        return;
+    }
+    if (esp_timer_is_active(kids_english_recording_timer_handle_)) {
+        esp_timer_stop(kids_english_recording_timer_handle_);
+    }
+    esp_timer_start_periodic(kids_english_recording_timer_handle_,
+                             kKidsEnglishRecordingCheckIntervalMs * 1000);
+#endif
+}
+
+void Application::StopKidsEnglishRecordingCheckTimer() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (kids_english_recording_timer_handle_ == nullptr) {
+        return;
+    }
+    if (esp_timer_is_active(kids_english_recording_timer_handle_)) {
+        esp_timer_stop(kids_english_recording_timer_handle_);
+    }
 #endif
 }
 
@@ -1535,6 +1603,7 @@ bool Application::AppendKidsEnglishSimulatedRecordingSegment(const std::string& 
             kids_english_recording_started_at_ms_ = now_ms;
         }
         kids_english_recording_silence_started_at_ms_ = now_ms;
+        StartKidsEnglishRecordingCheckTimer();
         total_samples = kids_english_simulated_recording_pcm_.size();
     }
 

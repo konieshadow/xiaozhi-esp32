@@ -891,6 +891,35 @@ config KIDS_ENGLISH_AUTO_SELF_TEST
         PCM WAV, downloads and plays TTS, ends the conversation, and verifies
         the expected 409 response for an upload after end.
 
+config KIDS_ENGLISH_INITIAL_SILENCE_TIMEOUT_MS
+    int "Kids English initial silence timeout (ms)"
+    default 7000
+    range 1000 15000
+    depends on USE_KIDS_ENGLISH_SERVER
+    help
+        Maximum time to wait for the child to start speaking before canceling
+        the recording.
+
+config KIDS_ENGLISH_END_SILENCE_TIMEOUT_MS
+    int "Kids English end silence timeout (ms)"
+    default 800
+    range 300 3000
+    depends on USE_KIDS_ENGLISH_SERVER
+    help
+        Local VAD tail-silence duration used to stop recording and upload the
+        WAV in the HTTP conversation flow. Lower values reduce perceived
+        latency but can cut off trailing speech in noisy rooms.
+
+config KIDS_ENGLISH_MAX_RECORDING_DURATION_MS
+    int "Kids English max recording duration (ms)"
+    default 10000
+    range 1000 10000
+    depends on USE_KIDS_ENGLISH_SERVER
+    help
+        Safety cap for a single Kids English recording. The service contract
+        accepts WAV audio up to 10 seconds, so keep this value at or below
+        10000 unless the server contract changes.
+
 menu "WiFi Configuration Method"
     help
         WiFi Configuration Method Selection

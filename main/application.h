@@ -33,6 +33,7 @@
 #define MAIN_EVENT_START_LISTENING      (1 << 10)
 #define MAIN_EVENT_STOP_LISTENING       (1 << 11)
 #define MAIN_EVENT_STATE_CHANGED        (1 << 12)
+#define MAIN_EVENT_KIDS_RECORDING_CHECK (1 << 13)
 
 
 enum AecMode {
@@ -136,6 +137,7 @@ private:
     std::unique_ptr<Protocol> protocol_;
     EventGroupHandle_t event_group_ = nullptr;
     esp_timer_handle_t clock_timer_handle_ = nullptr;
+    esp_timer_handle_t kids_english_recording_timer_handle_ = nullptr;
     DeviceStateMachine state_machine_;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     AecMode aec_mode_ = kAecOff;
@@ -190,6 +192,8 @@ private:
                                                     std::vector<int16_t>&& pcm);
     void StartKidsEnglishRecordingDetection();
     void StopKidsEnglishRecordingDetection();
+    void StartKidsEnglishRecordingCheckTimer();
+    void StopKidsEnglishRecordingCheckTimer();
     void HandleKidsEnglishVadChange(bool speaking);
     void CheckKidsEnglishRecordingAutoStop();
     void ResetKidsEnglishDailyStatusIfNeeded();
