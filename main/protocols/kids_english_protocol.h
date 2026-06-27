@@ -130,7 +130,11 @@ private:
         size_t queue_min_depth = 0;
         size_t playback_chunks = 0;
         size_t playback_samples = 0;
+        size_t jitter_buffer_peak_chunks = 0;
+        int jitter_buffer_peak_ms = 0;
         uint32_t underruns = 0;
+        uint32_t jitter_rebuffers = 0;
+        uint32_t jitter_releases = 0;
     };
 
     std::string base_url_;
@@ -169,6 +173,11 @@ private:
     std::string ws_output_audio_buffer_;
     int ws_output_audio_sample_rate_hz_ = 16000;
     int ws_output_audio_channels_ = 1;
+    bool ws_output_jitter_buffering_ = false;
+    bool ws_output_jitter_rebuffering_ = false;
+    int ws_output_jitter_sample_rate_hz_ = 16000;
+    size_t ws_output_jitter_samples_ = 0;
+    std::vector<std::vector<int16_t>> ws_output_jitter_chunks_;
     WsTurnMetrics ws_turn_metrics_;
     std::vector<std::unique_ptr<AudioStreamPacket>> pending_audio_;
     std::vector<int16_t> pending_pcm_;
@@ -239,6 +248,10 @@ private:
     void HandleWsAudioUrlAsync(const std::string& url);
     bool HandleWsAudioBuffer();
     bool PushWsPcmAudioChunk(const char* payload, size_t len, int sample_rate);
+    bool FlushWsJitterBuffer(const char* reason);
+    void ResetWsJitterBufferLocked();
+    bool IsWsJitterBufferReadyLocked() const;
+    int WsJitterBufferDurationMsLocked() const;
     void ResetWsTurnMetricsLocked();
     void LogWsTurnMetricsLocked(const char* reason) const;
     void TrySendWsPlaybackFinished(const char* reason);

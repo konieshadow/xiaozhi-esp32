@@ -61,6 +61,8 @@ constexpr int kPracticeAudioChannels = 1;
 constexpr int kPracticeAudioBitsPerSample = 16;
 constexpr int kWsInputFrameDurationMs = 20;
 constexpr int kWsInputFrameSamples = kPracticeAudioSampleRate * kWsInputFrameDurationMs / 1000;
+constexpr size_t kWsOutputJitterMinChunks = 3;
+constexpr int kWsOutputJitterMinMs = 750;
 constexpr size_t kWsAudioHeaderBytes = 16;
 constexpr int kMaxPracticeAudioDurationSeconds = 10;
 constexpr size_t kMaxPracticeAudioBytes = 5 * 1024 * 1024;
@@ -1276,6 +1278,7 @@ bool KidsEnglishProtocol::ConnectWebSocket() {
         ws_output_audio_buffer_.clear();
         ws_output_audio_sample_rate_hz_ = kPracticeAudioSampleRate;
         ws_output_audio_channels_ = kPracticeAudioChannels;
+        ResetWsJitterBufferLocked();
     }
 
     if (!websocket_->Connect(config.websocket_url.c_str())) {
@@ -1558,6 +1561,7 @@ bool KidsEnglishProtocol::UploadPcmAudioWebSocket(const std::vector<int16_t>& pc
         ws_output_audio_buffer_.clear();
         ws_output_audio_sample_rate_hz_ = kPracticeAudioSampleRate;
         ws_output_audio_channels_ = kPracticeAudioChannels;
+        ResetWsJitterBufferLocked();
     }
     if (ws_event_group_ != nullptr) {
         xEventGroupClearBits(ws_event_group_, kWsTurnCompleteEvent | kWsReconnectRequiredEvent |
@@ -2342,7 +2346,9 @@ void KidsEnglishProtocol::LogWsTurnMetricsLocked(const char* reason) const {
              "submittedToAudioStartMs=%d submittedToFirstBinaryMs=%d firstBinaryToQueueMs=%d "
              "firstBinaryToPlaybackStartMs=%d playbackStartedToFinishedMs=%d "
              "submittedToTurnCompleteMs=%d audioBytes=%u audioChunks=%u playbackChunks=%u "
-             "playbackSamples=%u queuePeak=%u queueMin=%u underruns=%u fallback=%s fallbackReason=%s",
+             "playbackSamples=%u queuePeak=%u queueMin=%u underruns=%u "
+             "jitterPeakChunks=%u jitterPeakMs=%d jitterRebuffers=%u jitterReleases=%u "
+             "fallback=%s fallbackReason=%s",
              reason == nullptr ? "unknown" : reason, m.conversation_id.c_str(),
              m.client_turn_id.c_str(), m.server_turn_id.c_str(), LogMs(m.turn_begin_ms),
              LogMs(m.audio_submitted_ms), LogMs(m.assistant_audio_start_ms),
@@ -2359,6 +2365,8 @@ void KidsEnglishProtocol::LogWsTurnMetricsLocked(const char* reason) const {
              (unsigned)m.audio_chunks, (unsigned)m.playback_chunks,
              (unsigned)m.playback_samples, (unsigned)m.queue_peak_depth,
              (unsigned)m.queue_min_depth, (unsigned)m.underruns,
+             (unsigned)m.jitter_buffer_peak_chunks, m.jitter_buffer_peak_ms,
+             (unsigned)m.jitter_rebuffers, (unsigned)m.jitter_releases,
              m.fallback_requested ? "true" : "false", m.fallback_reason.c_str());
 }
 
@@ -2367,8 +2375,121 @@ bool KidsEnglishProtocol::PushWsPcmAudioChunk(const char* payload, size_t len, i
     if (!ParsePcm16MonoBytes(std::string(payload, len), pcm)) {
         return false;
     }
-    Application::GetInstance().GetAudioService().PushPcmToPlaybackQueue(std::move(pcm), sample_rate);
+
+    bool should_flush = false;
+    bool direct_push = false;
+    std::string conversation_id;
+    std::string turn_id;
+    size_t buffered_chunks = 0;
+    int buffered_ms = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!ws_output_playback_pending_) {
+            direct_push = true;
+        } else {
+            if (ws_output_jitter_chunks_.empty()) {
+                ws_output_jitter_sample_rate_hz_ = sample_rate;
+            } else if (sample_rate != ws_output_jitter_sample_rate_hz_) {
+                ESP_LOGW(TAG, "WebSocket PCM sample rate changed during segment: old=%d new=%d",
+                         ws_output_jitter_sample_rate_hz_, sample_rate);
+                ws_output_jitter_sample_rate_hz_ = sample_rate;
+            }
+            ws_output_jitter_samples_ += pcm.size();
+            ws_output_jitter_chunks_.push_back(std::move(pcm));
+            ws_output_jitter_buffering_ = true;
+            buffered_chunks = ws_output_jitter_chunks_.size();
+            buffered_ms = WsJitterBufferDurationMsLocked();
+            conversation_id = ws_output_audio_conversation_id_;
+            turn_id = ws_output_audio_turn_id_;
+            if (ws_turn_metrics_.active && conversation_id == ws_turn_metrics_.conversation_id) {
+                ws_turn_metrics_.jitter_buffer_peak_chunks =
+                    std::max(ws_turn_metrics_.jitter_buffer_peak_chunks, buffered_chunks);
+                ws_turn_metrics_.jitter_buffer_peak_ms =
+                    std::max(ws_turn_metrics_.jitter_buffer_peak_ms, buffered_ms);
+            }
+            should_flush = IsWsJitterBufferReadyLocked();
+        }
+    }
+    if (direct_push) {
+        Application::GetInstance().GetAudioService().PushPcmToPlaybackQueue(std::move(pcm),
+                                                                            sample_rate);
+        return true;
+    }
+    ESP_LOGI(TAG,
+             "WS_NATIVE_JITTER_BUFFER timeMs=%u conversationId=%s turnId=%s chunks=%u "
+             "durationMs=%d ready=%s",
+             LogMs(NowMs()), conversation_id.c_str(), turn_id.c_str(),
+             (unsigned)buffered_chunks, buffered_ms, should_flush ? "true" : "false");
+    if (should_flush) {
+        return FlushWsJitterBuffer("low_watermark");
+    }
     return true;
+}
+
+bool KidsEnglishProtocol::FlushWsJitterBuffer(const char* reason) {
+    std::vector<std::vector<int16_t>> chunks;
+    int sample_rate = kPracticeAudioSampleRate;
+    std::string conversation_id;
+    std::string turn_id;
+    size_t samples = 0;
+    int duration_ms = 0;
+    bool rebuffer_release = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (ws_output_jitter_chunks_.empty()) {
+            return true;
+        }
+        chunks.swap(ws_output_jitter_chunks_);
+        samples = ws_output_jitter_samples_;
+        duration_ms = WsJitterBufferDurationMsLocked();
+        ws_output_jitter_samples_ = 0;
+        sample_rate = ws_output_jitter_sample_rate_hz_;
+        conversation_id = ws_output_audio_conversation_id_;
+        turn_id = ws_output_audio_turn_id_;
+        rebuffer_release = ws_output_jitter_rebuffering_;
+        ws_output_jitter_buffering_ = false;
+        ws_output_jitter_rebuffering_ = false;
+        if (ws_turn_metrics_.active && conversation_id == ws_turn_metrics_.conversation_id) {
+            ++ws_turn_metrics_.jitter_releases;
+        }
+    }
+
+    ESP_LOGI(TAG,
+             "WS_NATIVE_JITTER_RELEASE timeMs=%u reason=%s conversationId=%s turnId=%s "
+             "chunks=%u samples=%u durationMs=%d rebuffer=%s",
+             LogMs(NowMs()), reason == nullptr ? "unknown" : reason, conversation_id.c_str(),
+             turn_id.c_str(), (unsigned)chunks.size(), (unsigned)samples, duration_ms,
+             rebuffer_release ? "true" : "false");
+    std::vector<int16_t> merged;
+    merged.reserve(samples);
+    for (auto& chunk : chunks) {
+        merged.insert(merged.end(), chunk.begin(), chunk.end());
+    }
+    if (!merged.empty()) {
+        Application::GetInstance().GetAudioService().PushPcmToPlaybackQueue(std::move(merged),
+                                                                            sample_rate);
+    }
+    return true;
+}
+
+void KidsEnglishProtocol::ResetWsJitterBufferLocked() {
+    ws_output_jitter_buffering_ = false;
+    ws_output_jitter_rebuffering_ = false;
+    ws_output_jitter_sample_rate_hz_ = kPracticeAudioSampleRate;
+    ws_output_jitter_samples_ = 0;
+    ws_output_jitter_chunks_.clear();
+}
+
+bool KidsEnglishProtocol::IsWsJitterBufferReadyLocked() const {
+    return ws_output_jitter_chunks_.size() >= kWsOutputJitterMinChunks &&
+           WsJitterBufferDurationMsLocked() >= kWsOutputJitterMinMs;
+}
+
+int KidsEnglishProtocol::WsJitterBufferDurationMsLocked() const {
+    if (ws_output_jitter_sample_rate_hz_ <= 0) {
+        return 0;
+    }
+    return static_cast<int>(ws_output_jitter_samples_ * 1000 / ws_output_jitter_sample_rate_hz_);
 }
 
 std::string KidsEnglishProtocol::ResolveAudioUrl(const std::string& url) const {
@@ -2513,7 +2634,9 @@ void KidsEnglishProtocol::HandleWsBinaryFrame(const char* data, size_t len) {
         return;
     }
     if (should_finalize) {
-        if (!stream_pcm_chunk) {
+        if (stream_pcm_chunk) {
+            FlushWsJitterBuffer("binary_end");
+        } else {
             HandleWsAudioPlayback();
         }
         {
@@ -2649,6 +2772,7 @@ void KidsEnglishProtocol::HandleWsAssistantAudioStart(const cJSON* root) {
         ws_output_audio_buffer_.clear();
         ws_output_audio_sample_rate_hz_ = sample_rate;
         ws_output_audio_channels_ = channels;
+        ResetWsJitterBufferLocked();
         if (ws_turn_metrics_.active && conversation_id == ws_turn_metrics_.conversation_id &&
             ws_turn_metrics_.assistant_audio_start_ms == 0) {
             ws_turn_metrics_.assistant_audio_start_ms = now_ms;
@@ -2660,6 +2784,14 @@ void KidsEnglishProtocol::HandleWsAssistantAudioStart(const cJSON* root) {
              "turnIdPresent=%s audioFormat=%s transport=%s url=%s sampleRateHz=%d channels=%d",
              LogMs(now_ms), conversation_id.c_str(), turn_id.c_str(), turn_id_present ? "true" : "false",
              audio_format.c_str(), transport.c_str(), redacted_url.c_str(), sample_rate, channels);
+    if (transport == "binary_chunk" &&
+        (audio_format == "pcm_s16le" || audio_format == "pcm_s16le_16k_mono")) {
+        ESP_LOGI(TAG,
+                 "WS_NATIVE_JITTER_RESET timeMs=%u conversationId=%s turnId=%s "
+                 "minChunks=%u minMs=%d sampleRateHz=%d",
+                 LogMs(now_ms), conversation_id.c_str(), turn_id.c_str(),
+                 (unsigned)kWsOutputJitterMinChunks, kWsOutputJitterMinMs, sample_rate);
+    }
     EmitTtsMessage("start");
     if (transport == "url") {
         HandleWsAudioUrlAsync(url);
@@ -2694,10 +2826,11 @@ void KidsEnglishProtocol::HandleWsAssistantAudioEnd(const cJSON* root) {
         if (!turn_id.empty()) {
             ws_output_audio_turn_id_ = turn_id;
         }
-        should_play = ws_output_audio_active_ && !ws_output_audio_finalized_ &&
-                      ((ws_output_audio_transport_ == "binary_chunk" &&
-                        !ws_output_audio_buffer_.empty()) ||
-                       ws_output_audio_transport_ == "url");
+        should_play =
+            ws_output_audio_active_ && !ws_output_audio_finalized_ &&
+            ((ws_output_audio_transport_ == "binary_chunk" &&
+              (!ws_output_audio_buffer_.empty() || !ws_output_jitter_chunks_.empty())) ||
+             ws_output_audio_transport_ == "url");
         should_emit_stop = !ws_waiting_turn_complete_ && ws_tts_playback_started_;
         should_continue = ws_should_continue_listening_;
         was_initial_audio = ws_waiting_initial_audio_;
@@ -2710,7 +2843,11 @@ void KidsEnglishProtocol::HandleWsAssistantAudioEnd(const cJSON* root) {
              "WS_NATIVE_ASSISTANT_AUDIO_END timeMs=%u conversationId=%s turnId=%s",
              LogMs(now_ms), conversation_id.c_str(), turn_id.c_str());
     if (should_play) {
-        HandleWsAudioPlayback();
+        if (ws_output_audio_transport_ == "binary_chunk") {
+            FlushWsJitterBuffer("assistant_audio_end");
+        } else {
+            HandleWsAudioPlayback();
+        }
     }
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -2886,7 +3023,7 @@ void KidsEnglishProtocol::OnPcmPlaybackQueued(size_t samples, size_t queue_depth
             ws_turn_metrics_.queue_min_depth = queue_depth;
         }
     }
-    ESP_LOGI(TAG,
+    ESP_LOGD(TAG,
              "WS_NATIVE_PCM_QUEUE_PUSH timeMs=%u conversationId=%s turnId=%s samples=%u "
              "queueDepth=%u",
              LogMs(NowMs()), ws_output_audio_conversation_id_.c_str(), ws_output_audio_turn_id_.c_str(),
@@ -2928,11 +3065,11 @@ void KidsEnglishProtocol::OnAudioPlaybackStarted(size_t samples, size_t remainin
             }
         }
     }
-    ESP_LOGI(TAG,
-             "WS_NATIVE_PLAYBACK_STARTED timeMs=%u conversationId=%s turnId=%s samples=%u "
-             "remainingQueueDepth=%u firstEvent=%s",
-             LogMs(now_ms), conversation_id.c_str(), turn_id.c_str(), (unsigned)samples,
-             (unsigned)remaining_queue_depth, should_send ? "true" : "false");
+    ESP_LOG_LEVEL(should_send ? ESP_LOG_INFO : ESP_LOG_DEBUG, TAG,
+                  "WS_NATIVE_PLAYBACK_STARTED timeMs=%u conversationId=%s turnId=%s samples=%u "
+                  "remainingQueueDepth=%u firstEvent=%s",
+                  LogMs(now_ms), conversation_id.c_str(), turn_id.c_str(), (unsigned)samples,
+                  (unsigned)remaining_queue_depth, should_send ? "true" : "false");
     if (should_send) {
         SendWsPlaybackEvent("playback.started", conversation_id, turn_id);
     }
@@ -2940,6 +3077,7 @@ void KidsEnglishProtocol::OnAudioPlaybackStarted(size_t samples, size_t remainin
 
 void KidsEnglishProtocol::OnAudioPlaybackFinished(size_t samples, bool queue_drained) {
     bool pending = false;
+    bool underrun = false;
     std::string conversation_id;
     std::string turn_id;
     {
@@ -2951,6 +3089,12 @@ void KidsEnglishProtocol::OnAudioPlaybackFinished(size_t samples, bool queue_dra
             conversation_id == ws_turn_metrics_.conversation_id) {
             if (queue_drained && !ws_output_audio_end_received_) {
                 ++ws_turn_metrics_.underruns;
+                underrun = true;
+                if (!ws_output_jitter_rebuffering_) {
+                    ++ws_turn_metrics_.jitter_rebuffers;
+                }
+                ws_output_jitter_rebuffering_ = true;
+                ws_output_jitter_buffering_ = true;
             }
         }
         if (queue_drained) {
@@ -2960,11 +3104,11 @@ void KidsEnglishProtocol::OnAudioPlaybackFinished(size_t samples, bool queue_dra
     if (!pending) {
         return;
     }
-    ESP_LOGI(TAG,
-             "WS_NATIVE_PLAYBACK_CHUNK_FINISHED timeMs=%u conversationId=%s turnId=%s "
-             "samples=%u queueDrained=%s",
-             LogMs(NowMs()), conversation_id.c_str(), turn_id.c_str(), (unsigned)samples,
-             queue_drained ? "true" : "false");
+    ESP_LOG_LEVEL((queue_drained || underrun) ? ESP_LOG_INFO : ESP_LOG_DEBUG, TAG,
+                  "WS_NATIVE_PLAYBACK_CHUNK_FINISHED timeMs=%u conversationId=%s turnId=%s "
+                  "samples=%u queueDrained=%s underrun=%s",
+                  LogMs(NowMs()), conversation_id.c_str(), turn_id.c_str(), (unsigned)samples,
+                  queue_drained ? "true" : "false", underrun ? "true" : "false");
     if (queue_drained) {
         TrySendWsPlaybackFinished("playback_queue_drained");
     }
