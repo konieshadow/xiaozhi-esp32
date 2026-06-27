@@ -34,6 +34,8 @@ For connected hardware, first verify the serial device, usually with `rtk ls /de
 
 Keep `KIDS_ENGLISH_AUTO_SELF_TEST` disabled for normal development, formal firmware builds, and formal device flashes so ordinary boots do not automatically run the Kids English self-test. Run the self-test manually from the Kids English debug menu when possible; enable `KIDS_ENGLISH_AUTO_SELF_TEST` only for explicit temporary integration-test firmware, and disable it again after testing.
 
+When `CONFIG_USE_KIDS_ENGLISH_SERVER` is enabled, the default device server URL is the production service `https://xiaozhi.comellia.com`. The previous LAN address `http://192.168.2.152:3000` is still the local debug address; use it only as a menuconfig/local `sdkconfig` override when testing a service running on that host, never as the committed default.
+
 ## Coding Style & Naming Conventions
 
 C++ uses the repository `.clang-format`, based on Google style: 4-space indentation, 100-column limit, attached braces, sorted includes, and left-aligned pointers. Run formatting before submitting:
