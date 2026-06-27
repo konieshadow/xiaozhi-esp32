@@ -829,6 +829,33 @@ void Application::ClearDebugMessages() {
     });
 }
 
+void Application::AdjustOutputVolume(int delta) {
+    auto codec = Board::GetInstance().GetAudioCodec();
+    if (codec == nullptr) {
+        return;
+    }
+    SetOutputVolume(codec->output_volume() + delta);
+}
+
+void Application::SetOutputVolume(int volume) {
+    if (volume < 0) {
+        volume = 0;
+    } else if (volume > 100) {
+        volume = 100;
+    }
+
+    auto& board = Board::GetInstance();
+    auto codec = board.GetAudioCodec();
+    if (codec == nullptr) {
+        return;
+    }
+
+    codec->SetOutputVolume(volume);
+    auto display = board.GetDisplay();
+    display->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume), 1500);
+    display->UpdateStatusBar(true);
+}
+
 void Application::ResetKidsEnglishDailyStatusIfNeeded() {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
     time_t now = time(nullptr);

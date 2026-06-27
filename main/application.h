@@ -118,6 +118,8 @@ public:
     AudioService& GetAudioService() { return audio_service_; }
     void ShowDebugInfo();
     void ClearDebugMessages();
+    void AdjustOutputVolume(int delta);
+    void SetOutputVolume(int volume);
     void SendSimulatedRecording(const std::string& text);
     void StartKidsEnglishSelfTest();
     void MarkKidsEnglishConversationStarted();

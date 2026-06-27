@@ -666,6 +666,11 @@ void LcdDisplay::RenderDebugMenu() {
             lv_obj_remove_flag(debug_back_button_, LV_OBJ_FLAG_HIDDEN);
             RenderDebugSimulatedRecordings();
             break;
+        case DebugMenuView::kVolume:
+            lv_label_set_text(debug_title_label_, "音量设置");
+            lv_obj_remove_flag(debug_back_button_, LV_OBJ_FLAG_HIDDEN);
+            RenderDebugVolume();
+            break;
     }
 #endif
 }
@@ -687,6 +692,13 @@ void LcdDisplay::RenderDebugHome() {
         auto display = static_cast<LcdDisplay*>(lv_obj_get_user_data(target));
         if (display != nullptr) {
             display->SetDebugMenuView(DebugMenuView::kSimulatedRecording);
+        }
+    });
+    CreateDebugAction(debug_content_, FONT_AWESOME_VOLUME_HIGH, "音量设置", [](lv_event_t* e) {
+        auto target = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+        auto display = static_cast<LcdDisplay*>(lv_obj_get_user_data(target));
+        if (display != nullptr) {
+            display->SetDebugMenuView(DebugMenuView::kVolume);
         }
     });
     CreateDebugAction(debug_content_, FONT_AWESOME_CIRCLE_CHECK, "执行自测", [](lv_event_t*) {
@@ -741,6 +753,82 @@ void LcdDisplay::RenderDebugSimulatedRecordings() {
             }
         }, const_cast<DebugPhrase*>(&phrase));
     }
+#endif
+}
+
+void LcdDisplay::RenderDebugVolume() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+    auto codec = Board::GetInstance().GetAudioCodec();
+    const int volume = codec == nullptr ? 0 : codec->output_volume();
+    char volume_text[32];
+    snprintf(volume_text, sizeof(volume_text), "%d%%", volume);
+
+    AddDebugInfoRow(debug_content_, "当前音量", volume_text);
+
+    auto controls = lv_obj_create(debug_content_);
+    lv_obj_set_width(controls, LV_PCT(100));
+    lv_obj_set_height(controls, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(controls, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(controls, 0, 0);
+    lv_obj_set_style_pad_all(controls, 0, 0);
+    lv_obj_set_style_pad_column(controls, lvgl_theme->spacing(3), 0);
+    lv_obj_set_flex_flow(controls, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(controls, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollbar_mode(controls, LV_SCROLLBAR_MODE_OFF);
+
+    static int volume_down_delta = -10;
+    static int volume_up_delta = 10;
+    auto create_step_button = [this, lvgl_theme, controls](const char* text, int* delta) {
+        auto button = lv_button_create(controls);
+        lv_obj_set_size(button, 74, 44);
+        lv_obj_set_style_radius(button, 7, 0);
+        lv_obj_set_style_bg_color(button, lvgl_theme->chat_background_color(), 0);
+        lv_obj_set_style_bg_opa(button, DISPLAY_ROUND_SAFE_STATUS_BAR ? LV_OPA_50 : LV_OPA_80,
+                                0);
+        lv_obj_set_style_border_width(button, 0, 0);
+        lv_obj_set_user_data(button, this);
+
+        auto label = lv_label_create(button);
+        lv_label_set_text(label, text);
+        lv_obj_set_style_text_font(label, &font_puhui_14_1, 0);
+        lv_obj_set_style_text_color(label, lvgl_theme->text_color(), 0);
+        lv_obj_center(label);
+
+        lv_obj_add_event_cb(button, [](lv_event_t* e) {
+            auto delta = static_cast<int*>(lv_event_get_user_data(e));
+            if (delta == nullptr) {
+                return;
+            }
+            auto target = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+            auto display = static_cast<LcdDisplay*>(lv_obj_get_user_data(target));
+            Application::GetInstance().AdjustOutputVolume(*delta);
+            if (display != nullptr) {
+                display->RenderDebugMenu();
+            }
+        }, LV_EVENT_CLICKED, delta);
+    };
+
+    create_step_button("-10", &volume_down_delta);
+    create_step_button("+10", &volume_up_delta);
+
+    CreateDebugAction(debug_content_, FONT_AWESOME_VOLUME_XMARK, "静音", [](lv_event_t* e) {
+        auto target = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+        auto display = static_cast<LcdDisplay*>(lv_obj_get_user_data(target));
+        Application::GetInstance().SetOutputVolume(0);
+        if (display != nullptr) {
+            display->RenderDebugMenu();
+        }
+    });
+    CreateDebugAction(debug_content_, FONT_AWESOME_VOLUME_HIGH, "最大音量", [](lv_event_t* e) {
+        auto target = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+        auto display = static_cast<LcdDisplay*>(lv_obj_get_user_data(target));
+        Application::GetInstance().SetOutputVolume(100);
+        if (display != nullptr) {
+            display->RenderDebugMenu();
+        }
+    });
 #endif
 }
 
