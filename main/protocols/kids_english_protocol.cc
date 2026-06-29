@@ -1509,6 +1509,7 @@ void KidsEnglishProtocol::CloseWebSocket() {
         ws_output_audio_turn_id_.clear();
         ws_output_playback_pending_ = false;
         ws_output_playback_queue_drained_ = false;
+        ws_url_audio_in_progress_ = false;
     }
     if (ws != nullptr) {
         ws->Close();
@@ -1594,7 +1595,8 @@ bool KidsEnglishProtocol::UploadPcmAudioForCurrentConversation(std::vector<int16
         }
     }
 
-    return UploadPcmAudio(std::move(pcm), conversation_id) == UploadResult::kSuccess;
+    UploadResult result = UploadPcmAudio(std::move(pcm), conversation_id);
+    return result == UploadResult::kSuccess || result == UploadResult::kConversationEnded;
 }
 
 bool KidsEnglishProtocol::UploadPcmAudioWebSocket(const std::vector<int16_t>& pcm,
@@ -1656,7 +1658,7 @@ bool KidsEnglishProtocol::UploadPcmAudioWebSocket(const std::vector<int16_t>& pc
     }
     if (ws_event_group_ != nullptr) {
         xEventGroupClearBits(ws_event_group_, kWsTurnCompleteEvent | kWsReconnectRequiredEvent |
-                                                  kWsDisconnectedEvent);
+                                                  kWsDisconnectedEvent | kWsConversationEndedEvent);
     }
 
     cJSON* payload = cJSON_CreateObject();
@@ -1750,10 +1752,20 @@ bool KidsEnglishProtocol::UploadPcmAudioWebSocket(const std::vector<int16_t>& pc
              LogMs(NowMs()), conversation_id.c_str(), client_turn_id.c_str(), duration_ms);
     EmitSttMessage("Audio submitted.");
 
-    EventBits_t bits = xEventGroupWaitBits(ws_event_group_, kWsTurnCompleteEvent | kWsReconnectRequiredEvent |
-                                                                kWsDisconnectedEvent,
+    EventBits_t bits = xEventGroupWaitBits(ws_event_group_,
+                                           kWsTurnCompleteEvent | kWsReconnectRequiredEvent |
+                                               kWsDisconnectedEvent | kWsConversationEndedEvent,
                                            pdTRUE, pdFALSE, pdMS_TO_TICKS(kUploadTimeoutMs));
-    if (!(bits & kWsTurnCompleteEvent)) {
+    if (bits & kWsTurnCompleteEvent) {
+        // Handled in HandleWsTurnComplete, after assistant audio playback drains.
+    } else if (bits & kWsConversationEndedEvent) {
+        bool was_open = ClearServerEndedConversation("ws_conversation_ended");
+        EmitTtsMessage("stop", nullptr, false);
+        EmitEmotion("neutral");
+        if (was_open && on_audio_channel_closed_ != nullptr) {
+            on_audio_channel_closed_();
+        }
+    } else {
         std::lock_guard<std::mutex> lock(mutex_);
         const char* reason = (bits & kWsReconnectRequiredEvent) ? "reconnect_required"
                              : (bits & kWsDisconnectedEvent) ? "disconnected"
@@ -1833,9 +1845,12 @@ KidsEnglishProtocol::UploadResult KidsEnglishProtocol::UploadPcmAudio(
     if (status < 200 || status >= 300) {
         cJSON* error_root = cJSON_Parse(response.c_str());
         if (status == 409 && IsConversationEndedError(error_root)) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            conversation_id_.clear();
-            session_id_.clear();
+            bool was_open = ClearServerEndedConversation("http_409_conversation_ended");
+            EmitTtsMessage("stop", nullptr, false);
+            EmitEmotion("neutral");
+            if (was_open && on_audio_channel_closed_ != nullptr) {
+                on_audio_channel_closed_();
+            }
             ESP_LOGW(TAG,
                      "Conversation already ended after upload attempt; local conversation state cleared");
             if (error_root != nullptr) {
@@ -1860,9 +1875,12 @@ KidsEnglishProtocol::UploadResult KidsEnglishProtocol::UploadPcmAudio(
     if (!cJSON_IsTrue(ok)) {
         ESP_LOGE(TAG, "Upload returned error: %s", GetErrorMessage(root).c_str());
         if (IsConversationEndedError(root)) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            conversation_id_.clear();
-            session_id_.clear();
+            bool was_open = ClearServerEndedConversation("http_ok_false_conversation_ended");
+            EmitTtsMessage("stop", nullptr, false);
+            EmitEmotion("neutral");
+            if (was_open && on_audio_channel_closed_ != nullptr) {
+                on_audio_channel_closed_();
+            }
             cJSON_Delete(root);
             return UploadResult::kConversationEnded;
         }
@@ -2294,10 +2312,55 @@ bool KidsEnglishProtocol::ReadHttpBody(Http* http, std::string& body) {
     return true;
 }
 
+bool KidsEnglishProtocol::ShouldContinueConversation(const ConversationResponse& response) const {
+    return response.should_continue_listening && response.device_state != "finished";
+}
+
+bool KidsEnglishProtocol::ClearServerEndedConversation(const char* reason) {
+    bool was_open = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        was_open = channel_opened_;
+        channel_opened_ = false;
+        upload_in_progress_ = false;
+        pending_audio_.clear();
+        pending_pcm_.clear();
+        conversation_id_.clear();
+        session_id_.clear();
+        ws_waiting_turn_complete_ = false;
+        ws_waiting_initial_audio_ = false;
+        ws_should_continue_listening_ = false;
+    }
+    ESP_LOGI(TAG, "Server ended Kids English conversation; local state cleared reason=%s",
+             reason == nullptr ? "unknown" : reason);
+    return was_open;
+}
+
+bool KidsEnglishProtocol::WaitForWsUrlAudioIfNeeded(int timeout_ms) {
+    bool wait_url_audio = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        wait_url_audio = ws_url_audio_in_progress_;
+    }
+    if (!wait_url_audio) {
+        return true;
+    }
+    if (ws_event_group_ == nullptr) {
+        return false;
+    }
+
+    EventBits_t bits = xEventGroupWaitBits(
+        ws_event_group_,
+        kWsUrlAudioFinishedEvent | kWsReconnectRequiredEvent | kWsDisconnectedEvent, pdTRUE,
+        pdFALSE, pdMS_TO_TICKS(timeout_ms));
+    return (bits & kWsUrlAudioFinishedEvent) != 0;
+}
+
 bool KidsEnglishProtocol::HandleConversationResponse(const ConversationResponse& response,
                                                      const char* fallback_text,
                                                      bool wait_for_playback) {
     (void)fallback_text;
+    bool should_continue = ShouldContinueConversation(response);
     ESP_LOGI(TAG,
              "Conversation response: conversationId=%s turnId=%s state=%s cue=%s "
              "ttsTextPresent=%s ttsText=%s ttsAudioUrl=%s format=%s continue=%s "
@@ -2307,7 +2370,7 @@ bool KidsEnglishProtocol::HandleConversationResponse(const ConversationResponse&
              response.device_state.c_str(), response.screen_cue.c_str(),
              response.has_tts_text ? "true" : "false", response.tts_text.c_str(),
              RedactUrlForLog(response.tts_audio_url).c_str(), response.audio_format.c_str(),
-             response.should_continue_listening ? "true" : "false", response.request_id.c_str(),
+             should_continue ? "true" : "false", response.request_id.c_str(),
              response.asr_duration_ms, response.llm_duration_ms, response.tts_duration_ms,
              response.total_duration_ms, response.provider_fallback ? "true" : "false",
              response.provider_error_code.c_str());
@@ -2347,14 +2410,15 @@ bool KidsEnglishProtocol::HandleConversationResponse(const ConversationResponse&
         played = false;
     }
 
-    if (!response.should_continue_listening) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        conversation_id_.clear();
-        session_id_.clear();
+    bool was_open = false;
+    if (!should_continue) {
+        was_open = ClearServerEndedConversation("http_turn_complete");
     }
-    EmitTtsMessage("stop", display_text.empty() ? nullptr : display_text.c_str(),
-                   response.should_continue_listening);
-    EmitEmotion(response.should_continue_listening ? "happy" : "neutral");
+    EmitTtsMessage("stop", display_text.empty() ? nullptr : display_text.c_str(), should_continue);
+    EmitEmotion(should_continue ? "happy" : "neutral");
+    if (!should_continue && was_open && on_audio_channel_closed_ != nullptr) {
+        on_audio_channel_closed_();
+    }
     return played;
 }
 
@@ -2694,10 +2758,20 @@ void KidsEnglishProtocol::HandleWsTextFrame(const char* data, size_t len) {
     } else if (event_type == "server.fallback") {
         HandleWsServerFallback(root);
     } else if (event_type == "conversation.ended") {
+        bool should_clear_now = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            conversation_id_.clear();
-            session_id_.clear();
+            ws_should_continue_listening_ = false;
+            should_clear_now = !ws_waiting_turn_complete_ && !ws_output_playback_pending_ &&
+                               !ws_url_audio_in_progress_;
+        }
+        if (should_clear_now) {
+            bool was_open = ClearServerEndedConversation("ws_conversation_ended_event");
+            EmitTtsMessage("stop", nullptr, false);
+            EmitEmotion("neutral");
+            if (was_open && on_audio_channel_closed_ != nullptr) {
+                on_audio_channel_closed_();
+            }
         }
         xEventGroupSetBits(ws_event_group_, kWsConversationEndedEvent);
     } else if (event_type == "error") {
@@ -3034,6 +3108,7 @@ void KidsEnglishProtocol::HandleWsTurnComplete(const cJSON* root) {
         cJSON_free(diagnostics_json);
     }
     int64_t now_ms = NowMs();
+    bool was_open = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (conversation_id.empty()) {
@@ -3052,16 +3127,17 @@ void KidsEnglishProtocol::HandleWsTurnComplete(const cJSON* root) {
             ws_turn_metrics_.turn_complete_ms = now_ms;
             LogWsTurnMetricsLocked("turn_complete");
         }
-        if (!should_continue) {
-            conversation_id_.clear();
-            session_id_.clear();
-        }
+        was_open = channel_opened_;
     }
     ESP_LOGI(TAG,
              "WS_NATIVE_TURN_COMPLETE timeMs=%u conversationId=%s turnId=%s "
              "shouldContinueListening=%s diagnostics=%s",
              LogMs(now_ms), conversation_id.c_str(), turn_id.c_str(), should_continue ? "true" : "false",
              diagnostics_text.c_str());
+    if (!WaitForWsUrlAudioIfNeeded(kUploadTimeoutMs)) {
+        ESP_LOGW(TAG,
+                 "Timed out waiting for WebSocket URL audio before turn.complete finalization");
+    }
     Application::GetInstance().GetAudioService().WaitForPlaybackQueueEmpty();
     bool self_test = false;
     {
@@ -3075,6 +3151,12 @@ void KidsEnglishProtocol::HandleWsTurnComplete(const cJSON* root) {
         ws_output_playback_queue_drained_ = true;
     }
     TrySendWsPlaybackFinished("turn_complete");
+    if (!should_continue) {
+        ClearServerEndedConversation("ws_turn_complete");
+        if (was_open && on_audio_channel_closed_ != nullptr) {
+            on_audio_channel_closed_();
+        }
+    }
     xEventGroupSetBits(ws_event_group_, kWsTurnCompleteEvent);
 }
 

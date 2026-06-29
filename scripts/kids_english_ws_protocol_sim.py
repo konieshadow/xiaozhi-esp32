@@ -66,6 +66,7 @@ class SimulatedWsClient:
         self.buffer = bytearray()
         self.state_events: list[str] = []
         self.turn_complete = False
+        self.conversation_id = "conversation-1"
         self.reconnect_required = False
 
     def on_event(self, event: dict) -> None:
@@ -94,6 +95,13 @@ class SimulatedWsClient:
             self.turn_complete = True
             if payload.get("shouldContinueListening"):
                 self.state_events.append("listening")
+            else:
+                self.state_events.append("idle")
+                self.conversation_id = ""
+            return
+        if event_type == "conversation.ended":
+            self.conversation_id = ""
+            self.state_events.append("idle")
             return
         if event_type == "error" and payload.get("fallback") == "http":
             self.reconnect_required = True
@@ -179,6 +187,32 @@ def test_url_transport_downloads_on_audio_start() -> None:
     assert client.downloaded_urls == ["/api/audio/example"]
 
 
+def test_goodbye_turn_waits_for_audio_then_returns_idle() -> None:
+    client = SimulatedWsClient()
+    client.on_event(
+        {
+            "type": "assistant.audio.start",
+            "payload": {"audioFormat": "wav", "transport": "binary_chunk"},
+        }
+    )
+    client.on_binary(encode_audio_frame(SERVER_OUTPUT, 1, b"RIFF"))
+    client.on_binary(encode_audio_frame(SERVER_OUTPUT, 2, b"WAVE", end_of_segment=True))
+    client.on_event({"type": "assistant.audio.end", "payload": {}})
+    assert client.playback_chunks == [b"RIFFWAVE"]
+    assert client.conversation_id == "conversation-1"
+    client.on_event(
+        {
+            "type": "turn.complete",
+            "payload": {
+                "shouldContinueListening": False,
+                "diagnostics": {"userGoodbyeDetected": True},
+            },
+        }
+    )
+    assert client.state_events[-1] == "idle"
+    assert client.conversation_id == ""
+
+
 def test_error_fallback_http_requires_reconnect() -> None:
     client = SimulatedWsClient()
     client.on_event(
@@ -195,6 +229,7 @@ def main() -> None:
     test_native_pcm_streaming_starts_on_audio_start_and_plays_chunks()
     test_adapter_fallback_keeps_turn_and_plays_wav_after_end()
     test_url_transport_downloads_on_audio_start()
+    test_goodbye_turn_waits_for_audio_then_returns_idle()
     test_error_fallback_http_requires_reconnect()
     print("kids_english_ws_protocol_sim: ok")
 

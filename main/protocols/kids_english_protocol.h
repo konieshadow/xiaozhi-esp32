@@ -243,6 +243,9 @@ private:
     bool DownloadWavAudio(const std::string& url, std::vector<int16_t>& pcm, int& sample_rate,
                           std::string* content_type = nullptr);
     bool ReadHttpBody(Http* http, std::string& body);
+    bool ShouldContinueConversation(const ConversationResponse& response) const;
+    bool ClearServerEndedConversation(const char* reason);
+    bool WaitForWsUrlAudioIfNeeded(int timeout_ms);
     bool HandleConversationResponse(const ConversationResponse& response, const char* fallback_text,
                                     bool wait_for_playback = false);
     bool HandleWsAudioPlayback();
