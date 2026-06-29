@@ -918,29 +918,48 @@ void Application::MarkKidsEnglishConversationStarted() {
 
 void Application::SendSimulatedRecording(const std::string& text) {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
-    if (kids_english_submit_recording_task_handle_ != nullptr) {
-        Board::GetInstance().GetDisplay()->ShowNotification("录音提交中");
-        return;
-    }
+    Schedule([this, text]() {
+        if (kids_english_submit_recording_task_handle_ != nullptr) {
+            Board::GetInstance().GetDisplay()->ShowNotification("录音提交中");
+            return;
+        }
 
-    bool should_start_task = false;
-    size_t queued_segments = 0;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        kids_english_simulated_recording_queue_.push_back(text);
-        kids_english_simulated_recording_active_ = true;
-        queued_segments = kids_english_simulated_recording_queue_.size();
-        should_start_task = kids_english_simulated_recording_task_handle_ == nullptr;
-    }
-    Board::GetInstance().GetDisplay()->ShowNotification(
-        queued_segments > 1 ? "模拟录音已加入队列" : "准备模拟录音", 2000);
-    if (!should_start_task) {
-        return;
-    }
+        bool should_reload_protocol = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            should_reload_protocol = !kids_english_simulated_recording_active_ &&
+                                     kids_english_simulated_recording_task_handle_ == nullptr &&
+                                     kids_english_simulated_recording_queue_.empty() &&
+                                     kids_english_simulated_recording_pcm_.empty();
+        }
+        if (should_reload_protocol &&
+            (GetDeviceState() == kDeviceStateIdle || GetDeviceState() == kDeviceStateUnknown) &&
+            (protocol_ == nullptr || !protocol_->IsAudioChannelOpened())) {
+            ReloadKidsEnglishProtocol();
+            ESP_LOGI(TAG, "Preparing Kids English simulated recording environment=%s url=%s",
+                     KidsEnglishProtocol::GetConfiguredEnvironmentName().c_str(),
+                     KidsEnglishProtocol::GetConfiguredBaseUrl().c_str());
+        }
 
-    if (!StartKidsEnglishSimulatedRecordingTask()) {
-        Board::GetInstance().GetDisplay()->ShowNotification("模拟录音启动失败");
-    }
+        bool should_start_task = false;
+        size_t queued_segments = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            kids_english_simulated_recording_queue_.push_back(text);
+            kids_english_simulated_recording_active_ = true;
+            queued_segments = kids_english_simulated_recording_queue_.size();
+            should_start_task = kids_english_simulated_recording_task_handle_ == nullptr;
+        }
+        Board::GetInstance().GetDisplay()->ShowNotification(
+            queued_segments > 1 ? "模拟录音已加入队列" : "准备模拟录音", 2000);
+        if (!should_start_task) {
+            return;
+        }
+
+        if (!StartKidsEnglishSimulatedRecordingTask()) {
+            Board::GetInstance().GetDisplay()->ShowNotification("模拟录音启动失败");
+        }
+    });
 #else
     (void)text;
 #endif
@@ -948,28 +967,76 @@ void Application::SendSimulatedRecording(const std::string& text) {
 
 void Application::StartKidsEnglishSelfTest() {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
-    if (kids_english_self_test_task_handle_ != nullptr) {
-        ESP_LOGW(TAG, "Kids English self-test task already running");
-        Board::GetInstance().GetDisplay()->ShowNotification("自测已在运行", 2000);
-        return;
-    }
+    Schedule([this]() {
+        if (kids_english_self_test_task_handle_ != nullptr) {
+            ESP_LOGW(TAG, "Kids English self-test task already running");
+            Board::GetInstance().GetDisplay()->ShowNotification("自测已在运行", 2000);
+            return;
+        }
 
-    ESP_LOGI(TAG, "Scheduling Kids English hardware self-test");
-    auto created = xTaskCreate([](void* arg) {
-        Application* app = static_cast<Application*>(arg);
-        app->KidsEnglishSelfTestTask();
-        app->kids_english_self_test_task_handle_ = nullptr;
-        vTaskDelete(NULL);
-    }, "kids_self_test", 4096 * 2, this, 3, &kids_english_self_test_task_handle_);
-    if (created != pdPASS) {
-        kids_english_self_test_task_handle_ = nullptr;
-        ESP_LOGE(TAG, "Failed to create Kids English self-test task");
-        Board::GetInstance().GetDisplay()->ShowNotification("自测启动失败", 2000);
-        return;
-    }
-    Board::GetInstance().GetDisplay()->ShowNotification("自测开始", 2000);
+        ReloadKidsEnglishProtocol();
+
+        ESP_LOGI(TAG, "Scheduling Kids English hardware self-test environment=%s url=%s",
+                 KidsEnglishProtocol::GetConfiguredEnvironmentName().c_str(),
+                 KidsEnglishProtocol::GetConfiguredBaseUrl().c_str());
+        auto created = xTaskCreate([](void* arg) {
+            Application* app = static_cast<Application*>(arg);
+            app->KidsEnglishSelfTestTask();
+            app->kids_english_self_test_task_handle_ = nullptr;
+            vTaskDelete(NULL);
+        }, "kids_self_test", 4096 * 2, this, 3, &kids_english_self_test_task_handle_);
+        if (created != pdPASS) {
+            kids_english_self_test_task_handle_ = nullptr;
+            ESP_LOGE(TAG, "Failed to create Kids English self-test task");
+            Board::GetInstance().GetDisplay()->ShowNotification("自测启动失败", 2000);
+            return;
+        }
+        Board::GetInstance().GetDisplay()->ShowNotification("自测开始", 2000);
+    });
 #else
     ESP_LOGW(TAG, "Kids English self-test unavailable: server support disabled");
+#endif
+}
+
+void Application::ReloadKidsEnglishProtocol() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (protocol_ != nullptr) {
+        protocol_->CloseAudioChannel(false);
+        protocol_.reset();
+    }
+    InitializeProtocol();
+#endif
+}
+
+void Application::SetKidsEnglishEnvironment(KidsEnglishProtocol::Environment environment) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    Schedule([this, environment]() {
+        auto display = Board::GetInstance().GetDisplay();
+        auto state = GetDeviceState();
+        if (state != kDeviceStateIdle && state != kDeviceStateUnknown) {
+            display->ShowNotification("请先结束当前练习", 2000);
+            return;
+        }
+        if (kids_english_self_test_task_handle_ != nullptr ||
+            kids_english_submit_recording_task_handle_ != nullptr ||
+            kids_english_simulated_recording_task_handle_ != nullptr) {
+            display->ShowNotification("任务运行中，稍后再切换", 2000);
+            return;
+        }
+
+        KidsEnglishProtocol::SetConfiguredEnvironment(environment);
+        ReloadKidsEnglishProtocol();
+        DismissAlert();
+
+        std::string message = "已切换到";
+        message += environment == KidsEnglishProtocol::Environment::kProduction ? "生产环境" : "开发环境";
+        display->ShowNotification(message, 2000);
+        ESP_LOGI(TAG, "Kids English environment switched to %s url=%s",
+                 KidsEnglishProtocol::GetConfiguredEnvironmentName().c_str(),
+                 KidsEnglishProtocol::GetConfiguredBaseUrl().c_str());
+    });
+#else
+    (void)environment;
 #endif
 }
 
@@ -1249,6 +1316,9 @@ void Application::SubmitKidsEnglishRecording() {
         ESP_LOGI(TAG, "Kids English simulated PCM capture: samples=%u bytes=%u durationMs=%u",
                  (unsigned)simulated_pcm.size(), (unsigned)(simulated_pcm.size() * sizeof(int16_t)),
                  (unsigned)(simulated_pcm.size() * 1000 / 16000));
+        ESP_LOGI(TAG, "Submitting Kids English simulated recording environment=%s url=%s",
+                 KidsEnglishProtocol::GetConfiguredEnvironmentName().c_str(),
+                 KidsEnglishProtocol::GetConfiguredBaseUrl().c_str());
         StartKidsEnglishRecordingSubmission(std::move(simulated_pcm), "simulated");
         return;
     }

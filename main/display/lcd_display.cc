@@ -671,6 +671,11 @@ void LcdDisplay::RenderDebugMenu() {
             lv_obj_remove_flag(debug_back_button_, LV_OBJ_FLAG_HIDDEN);
             RenderDebugVolume();
             break;
+        case DebugMenuView::kEnvironment:
+            lv_label_set_text(debug_title_label_, "环境切换");
+            lv_obj_remove_flag(debug_back_button_, LV_OBJ_FLAG_HIDDEN);
+            RenderDebugEnvironment();
+            break;
     }
 #endif
 }
@@ -701,6 +706,13 @@ void LcdDisplay::RenderDebugHome() {
             display->SetDebugMenuView(DebugMenuView::kVolume);
         }
     });
+    CreateDebugAction(debug_content_, FONT_AWESOME_GLOBE, "环境切换", [](lv_event_t* e) {
+        auto target = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+        auto display = static_cast<LcdDisplay*>(lv_obj_get_user_data(target));
+        if (display != nullptr) {
+            display->SetDebugMenuView(DebugMenuView::kEnvironment);
+        }
+    });
     CreateDebugAction(debug_content_, FONT_AWESOME_CIRCLE_CHECK, "执行自测", [](lv_event_t*) {
         Application::GetInstance().StartKidsEnglishSelfTest();
     });
@@ -726,6 +738,8 @@ void LcdDisplay::RenderDebugDeviceInfo() {
     AddDebugInfoRow(debug_content_, "State", std::to_string(static_cast<int>(app.GetDeviceState())));
     AddDebugInfoRow(debug_content_, "Heap", std::to_string(SystemInfo::GetFreeHeapSize()));
     AddDebugInfoRow(debug_content_, "UUID", board.GetUuid());
+    AddDebugInfoRow(debug_content_, "Env", KidsEnglishProtocol::GetConfiguredEnvironmentName());
+    AddDebugInfoRow(debug_content_, "Server", KidsEnglishProtocol::GetConfiguredBaseUrl());
 
     if (!has_battery) {
         AddDebugInfoRow(debug_content_, "Battery", "n/a");
@@ -828,6 +842,30 @@ void LcdDisplay::RenderDebugVolume() {
         if (display != nullptr) {
             display->RenderDebugMenu();
         }
+    });
+#endif
+}
+
+void LcdDisplay::RenderDebugEnvironment() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    auto current_environment = KidsEnglishProtocol::GetConfiguredEnvironment();
+    AddDebugInfoRow(debug_content_, "当前环境",
+                    current_environment == KidsEnglishProtocol::Environment::kProduction
+                        ? "生产环境"
+                        : "开发环境");
+    AddDebugInfoRow(debug_content_, "当前地址", KidsEnglishProtocol::GetConfiguredBaseUrl());
+    AddDebugInfoRow(debug_content_, "生产地址",
+                    KidsEnglishProtocol::GetBaseUrl(KidsEnglishProtocol::Environment::kProduction));
+    AddDebugInfoRow(debug_content_, "开发地址",
+                    KidsEnglishProtocol::GetBaseUrl(KidsEnglishProtocol::Environment::kDevelopment));
+
+    CreateDebugAction(debug_content_, FONT_AWESOME_CIRCLE_CHECK, "切换到生产环境", [](lv_event_t*) {
+        Application::GetInstance().SetKidsEnglishEnvironment(
+            KidsEnglishProtocol::Environment::kProduction);
+    });
+    CreateDebugAction(debug_content_, FONT_AWESOME_GLOBE, "切换到开发环境", [](lv_event_t*) {
+        Application::GetInstance().SetKidsEnglishEnvironment(
+            KidsEnglishProtocol::Environment::kDevelopment);
     });
 #endif
 }

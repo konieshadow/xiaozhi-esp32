@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "protocol.h"
+#include "kids_english_protocol.h"
 #include "ota.h"
 #include "audio_service.h"
 #include "device_state.h"
@@ -122,6 +123,7 @@ public:
     void SetOutputVolume(int volume);
     void SendSimulatedRecording(const std::string& text);
     void StartKidsEnglishSelfTest();
+    void SetKidsEnglishEnvironment(KidsEnglishProtocol::Environment environment);
     void MarkKidsEnglishConversationStarted();
     
     /**
@@ -166,6 +168,7 @@ private:
     bool kids_english_recording_has_voice_ = false;
     bool kids_english_simulated_recording_active_ = false;
     bool kids_english_simulated_submit_requested_ = false;
+    void ReloadKidsEnglishProtocol();
     bool kids_english_submission_waiting_for_response_ = false;
     int kids_english_daily_conversation_count_ = 0;
     int kids_english_daily_conversation_yday_ = -1;

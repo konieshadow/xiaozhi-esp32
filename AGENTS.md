@@ -32,9 +32,11 @@ rtk proxy sh -lc 'IDF_PATH=$HOME/.espressif/v5.5.2/esp-idf IDF_PYTHON_ENV_PATH=$
 
 For connected hardware, first verify the serial device, usually with `rtk ls /dev/cu.usbmodem*`. The locally used Waveshare ESP32-S3-Touch-LCD-1.85 has appeared as `/dev/cu.usbmodem1201`; use `idf.py -p /dev/cu.usbmodem1201 flash` only after confirming it still matches.
 
+`idf_monitor` requires standard input to be attached to a TTY, so `idf.py monitor` / `idf.py flash monitor` will fail from non-TTY automation with errors such as `Monitor requires standard input to be attached to TTY`. For serial logs, run the monitor from a PTY/TTY-backed session, for example `rtk proxy script -q /dev/null sh -lc 'idf.py -p /dev/cu.usbmodem1201 monitor'`, or use a short direct serial read when only post-flash boot confirmation is needed.
+
 Keep `KIDS_ENGLISH_AUTO_SELF_TEST` disabled for normal development, formal firmware builds, and formal device flashes so ordinary boots do not automatically run the Kids English self-test. Run the self-test manually from the Kids English debug menu when possible; enable `KIDS_ENGLISH_AUTO_SELF_TEST` only for explicit temporary integration-test firmware, and disable it again after testing.
 
-When `CONFIG_USE_KIDS_ENGLISH_SERVER` is enabled, the default device server URL is the production service `https://xiaozhi.comellia.com`. The previous LAN address `http://192.168.2.152:3000` is still the local debug address; use it only as a menuconfig/local `sdkconfig` override when testing a service running on that host, never as the committed default.
+When `CONFIG_USE_KIDS_ENGLISH_SERVER` is enabled, the default device server URL is the production service `https://xiaozhi.comellia.com`. The previous LAN address `http://192.168.2.152:3000` is still the development/debug address; switch to it from the Kids English debug menu when testing a service running on that host. Keep production as the committed default.
 
 ## Coding Style & Naming Conventions
 
@@ -64,7 +66,7 @@ voltage = (adc_mv * 3.0f / 1000.0f) / 0.9945f;
 
 Prefer adding optional battery capability through shared board interfaces, so boards without battery ADC can return `false` instead of inheriting Waveshare-specific behavior.
 
-When `CONFIG_USE_KIDS_ENGLISH_SERVER` is enabled, the main LCD UI shows a small gear-shaped debug entry near the right side of the screen. Tap it to open the debug menu. `开始/提交练习` toggles the Kids English practice flow, `设备信息` prints board/state/heap/UUID/battery details on screen, and `清空消息` clears the visible debug/chat messages. On the Waveshare ESP32-S3-Touch-LCD-1.85 this relies on the CST816 touch controller being registered with LVGL.
+When `CONFIG_USE_KIDS_ENGLISH_SERVER` is enabled, the main LCD UI shows a small gear-shaped debug entry near the right side of the screen. Tap it to open the debug menu. `开始/提交练习` toggles the Kids English practice flow, `环境切换` switches between production and development server URLs while idle, `设备信息` prints board/state/heap/UUID/battery/environment details on screen, and `清空消息` clears the visible debug/chat messages. On the Waveshare ESP32-S3-Touch-LCD-1.85 this relies on the CST816 touch controller being registered with LVGL.
 
 ## Commit & Pull Request Guidelines
 

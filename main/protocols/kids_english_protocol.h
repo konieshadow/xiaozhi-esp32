@@ -18,6 +18,11 @@ class WebSocket;
 
 class KidsEnglishProtocol : public Protocol {
 public:
+    enum class Environment {
+        kProduction,
+        kDevelopment,
+    };
+
     KidsEnglishProtocol();
     ~KidsEnglishProtocol() override;
 
@@ -33,6 +38,12 @@ public:
     void SetNextConversationTrigger(const std::string& trigger);
     void SendStartListening(ListeningMode mode) override;
     void SendStopListening() override;
+    static Environment GetConfiguredEnvironment();
+    static std::string GetConfiguredEnvironmentName();
+    static std::string GetConfiguredBaseUrl();
+    static std::string GetEnvironmentName(Environment environment);
+    static std::string GetBaseUrl(Environment environment);
+    static void SetConfiguredEnvironment(Environment environment);
 
 protected:
     bool SendText(const std::string& text) override;

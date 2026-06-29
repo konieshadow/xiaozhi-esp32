@@ -863,8 +863,17 @@ config KIDS_ENGLISH_SERVER_URL
     depends on USE_KIDS_ENGLISH_SERVER
     help
         Base URL for the kids English service. The default points to the
-        production service. For local debugging, override it with the host
-        computer LAN IP, not localhost, for example http://192.168.2.152:3000.
+        production service. The Kids English debug menu can switch between this
+        production URL and the development URL below.
+
+config KIDS_ENGLISH_DEVELOPMENT_SERVER_URL
+    string "Kids English Development Server URL"
+    default "http://192.168.2.152:3000"
+    depends on USE_KIDS_ENGLISH_SERVER
+    help
+        Base URL used when the Kids English debug menu is switched to the
+        development environment. Use the host computer LAN IP, not localhost,
+        for example http://192.168.2.152:3000.
 
 config KIDS_ENGLISH_DEVICE_ID
     string "Kids English Device ID"

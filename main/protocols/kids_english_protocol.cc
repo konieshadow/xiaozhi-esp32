@@ -4,6 +4,7 @@
 #include "assets/lang_config.h"
 #include "audio_service.h"
 #include "board.h"
+#include "settings.h"
 
 #include <cJSON.h>
 #include <esp_app_desc.h>
@@ -27,6 +28,10 @@
 
 #ifndef CONFIG_KIDS_ENGLISH_SERVER_URL
 #define CONFIG_KIDS_ENGLISH_SERVER_URL ""
+#endif
+
+#ifndef CONFIG_KIDS_ENGLISH_DEVELOPMENT_SERVER_URL
+#define CONFIG_KIDS_ENGLISH_DEVELOPMENT_SERVER_URL "http://192.168.2.152:3000"
 #endif
 
 #ifndef CONFIG_KIDS_ENGLISH_DEVICE_ID
@@ -71,6 +76,10 @@ constexpr int kMaxPracticeAudioDurationSeconds = 10;
 constexpr size_t kMaxPracticeAudioBytes = 5 * 1024 * 1024;
 constexpr size_t kWavHeaderBytes = 44;
 constexpr int64_t kUnixTimeReasonableMs = 1600000000000LL;
+constexpr char kKidsEnglishSettingsNamespace[] = "kids_english";
+constexpr char kKidsEnglishEnvironmentKey[] = "environment";
+constexpr char kKidsEnglishEnvironmentProduction[] = "production";
+constexpr char kKidsEnglishEnvironmentDevelopment[] = "development";
 constexpr EventBits_t kWsSessionReadyEvent = BIT0;
 constexpr EventBits_t kWsConversationStartedEvent = BIT1;
 constexpr EventBits_t kWsTurnCompleteEvent = BIT2;
@@ -277,12 +286,14 @@ bool ResamplePcm16Mono(std::vector<int16_t>& pcm, int source_sample_rate, int ta
 }  // namespace
 
 KidsEnglishProtocol::KidsEnglishProtocol()
-    : base_url_(TrimTrailingSlash(CONFIG_KIDS_ENGLISH_SERVER_URL)),
+    : base_url_(GetConfiguredBaseUrl()),
       device_id_(CONFIG_KIDS_ENGLISH_DEVICE_ID),
       device_secret_(CONFIG_KIDS_ENGLISH_DEVICE_SECRET) {
     server_sample_rate_ = kPracticeAudioSampleRate;
     server_frame_duration_ = OPUS_FRAME_DURATION_MS;
     ws_event_group_ = xEventGroupCreate();
+    ESP_LOGI(TAG, "Kids English environment: %s baseUrl=%s", GetConfiguredEnvironmentName().c_str(),
+             base_url_.c_str());
 }
 
 KidsEnglishProtocol::~KidsEnglishProtocol() {
@@ -291,6 +302,49 @@ KidsEnglishProtocol::~KidsEnglishProtocol() {
         vEventGroupDelete(ws_event_group_);
         ws_event_group_ = nullptr;
     }
+}
+
+KidsEnglishProtocol::Environment KidsEnglishProtocol::GetConfiguredEnvironment() {
+    Settings settings(kKidsEnglishSettingsNamespace, false);
+    auto environment =
+        settings.GetString(kKidsEnglishEnvironmentKey, kKidsEnglishEnvironmentProduction);
+    if (environment == kKidsEnglishEnvironmentDevelopment) {
+        return Environment::kDevelopment;
+    }
+    return Environment::kProduction;
+}
+
+std::string KidsEnglishProtocol::GetConfiguredEnvironmentName() {
+    return GetEnvironmentName(GetConfiguredEnvironment());
+}
+
+std::string KidsEnglishProtocol::GetConfiguredBaseUrl() {
+    return GetBaseUrl(GetConfiguredEnvironment());
+}
+
+std::string KidsEnglishProtocol::GetEnvironmentName(Environment environment) {
+    switch (environment) {
+        case Environment::kDevelopment:
+            return kKidsEnglishEnvironmentDevelopment;
+        case Environment::kProduction:
+        default:
+            return kKidsEnglishEnvironmentProduction;
+    }
+}
+
+std::string KidsEnglishProtocol::GetBaseUrl(Environment environment) {
+    switch (environment) {
+        case Environment::kDevelopment:
+            return TrimTrailingSlash(CONFIG_KIDS_ENGLISH_DEVELOPMENT_SERVER_URL);
+        case Environment::kProduction:
+        default:
+            return TrimTrailingSlash(CONFIG_KIDS_ENGLISH_SERVER_URL);
+    }
+}
+
+void KidsEnglishProtocol::SetConfiguredEnvironment(Environment environment) {
+    Settings settings(kKidsEnglishSettingsNamespace, true);
+    settings.SetString(kKidsEnglishEnvironmentKey, GetEnvironmentName(environment));
 }
 
 bool KidsEnglishProtocol::Start() {

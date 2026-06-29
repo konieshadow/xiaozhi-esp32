@@ -48,6 +48,7 @@ protected:
         kDeviceInfo,
         kSimulatedRecording,
         kVolume,
+        kEnvironment,
     };
     DebugMenuView debug_menu_view_ = DebugMenuView::kHome;
 
@@ -61,6 +62,7 @@ protected:
     void RenderDebugDeviceInfo();
     void RenderDebugSimulatedRecordings();
     void RenderDebugVolume();
+    void RenderDebugEnvironment();
     lv_obj_t* CreateDebugAction(lv_obj_t* parent, const char* icon_text, const char* label_text,
                                 void (*handler)(lv_event_t*), void* user_data = nullptr);
     void AddDebugInfoRow(lv_obj_t* parent, const char* label, const std::string& value);
