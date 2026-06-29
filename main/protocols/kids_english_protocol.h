@@ -27,6 +27,7 @@ public:
     bool IsAudioChannelOpened() const override;
     bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) override;
     bool SendPcmAudio(std::vector<int16_t>&& pcm);
+    bool SubmitPcmAudio(std::vector<int16_t>&& pcm);
     bool GenerateSimulatedRecordingPcm(const std::string& text, std::vector<int16_t>& pcm);
     bool RunSelfTest();
     void SetNextConversationTrigger(const std::string& trigger);
@@ -225,6 +226,7 @@ private:
     bool IsWebSocketConnectedLocked() const;
     bool IsWebSocketHeartbeatTimedOut() const;
     bool UploadPendingAudio();
+    bool UploadPcmAudioForCurrentConversation(std::vector<int16_t>&& pcm);
     bool UploadPcmAudioWebSocket(const std::vector<int16_t>& pcm, const std::string& conversation_id);
     UploadResult UploadPcmAudio(std::vector<int16_t>&& pcm, const std::string& conversation_id);
     bool RequestStandaloneTts(const std::string& text, StandaloneTtsResponse& response);

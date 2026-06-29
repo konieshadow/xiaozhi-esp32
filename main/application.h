@@ -166,6 +166,7 @@ private:
     bool kids_english_recording_has_voice_ = false;
     bool kids_english_simulated_recording_active_ = false;
     bool kids_english_simulated_submit_requested_ = false;
+    bool kids_english_submission_waiting_for_response_ = false;
     int kids_english_daily_conversation_count_ = 0;
     int kids_english_daily_conversation_yday_ = -1;
     int64_t kids_english_recording_started_at_ms_ = 0;

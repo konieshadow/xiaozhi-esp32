@@ -620,6 +620,7 @@ void Application::InitializeProtocol() {
                 Schedule([this]() {
                     aborted_ = false;
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
+                    kids_english_submission_waiting_for_response_ = false;
                     if (GetDeviceState() == kDeviceStateConnecting) {
                         SetDeviceState(kDeviceStateListening);
                     }
@@ -892,7 +893,7 @@ void Application::UpdateKidsEnglishConversationStatus(const char* phase) {
                 break;
             case kDeviceStateSpeaking:
                 snprintf(text, sizeof(text),
-                         kids_english_submit_recording_task_handle_ != nullptr ? "提交中" : "AI回复");
+                         kids_english_submission_waiting_for_response_ ? "提交中" : "AI回复");
                 break;
             default:
                 snprintf(text, sizeof(text), "今日%d轮", kids_english_daily_conversation_count_);
@@ -1326,6 +1327,7 @@ bool Application::StartKidsEnglishRecordingSubmission(std::vector<int16_t>&& pcm
     }
 
     auto task_pcm = new std::vector<int16_t>(std::move(pcm));
+    kids_english_submission_waiting_for_response_ = true;
     SetDeviceState(kDeviceStateSpeaking);
     UpdateKidsEnglishConversationStatus("提交中");
     BaseType_t created = xTaskCreate([](void* arg) {
@@ -1338,6 +1340,7 @@ bool Application::StartKidsEnglishRecordingSubmission(std::vector<int16_t>&& pcm
     if (created != pdPASS) {
         delete task_pcm;
         kids_english_submit_recording_task_handle_ = nullptr;
+        kids_english_submission_waiting_for_response_ = false;
         ESP_LOGE(TAG, "Failed to create Kids English %s recording submission task", source);
         Board::GetInstance().GetDisplay()->ShowNotification("录音提交启动失败");
         SetDeviceState(kDeviceStateIdle);
@@ -1359,20 +1362,19 @@ void Application::KidsEnglishSubmitRecordingTask(std::vector<int16_t> pcm) {
         ESP_LOGE(TAG, "Kids English recording submission failed: protocol not initialized");
     } else {
         auto kids_protocol = static_cast<KidsEnglishProtocol*>(protocol_.get());
-        submitted = kids_protocol->SendPcmAudio(std::move(pcm));
-        if (submitted) {
-            ESP_LOGI(TAG, "Submitting Kids English recording to server");
-            protocol_->SendStopListening();
-        } else {
-            ESP_LOGW(TAG, "Failed to queue Kids English PCM recording for upload");
-        }
+        ESP_LOGI(TAG, "Submitting Kids English recording to server");
+        submitted = kids_protocol->SubmitPcmAudio(std::move(pcm));
+        ESP_LOGI(TAG, "Kids English recording submission finished: ok=%s",
+                 submitted ? "true" : "false");
     }
 
     if (!submitted) {
         Schedule([]() {
+            auto& app = Application::GetInstance();
+            app.kids_english_submission_waiting_for_response_ = false;
             auto display = Board::GetInstance().GetDisplay();
             display->ShowNotification("录音提交失败");
-            Application::GetInstance().SetDeviceState(kDeviceStateIdle);
+            app.SetDeviceState(kDeviceStateIdle);
         });
     }
 #else
@@ -1485,8 +1487,8 @@ void Application::CheckKidsEnglishRecordingAutoStop() {
         return;
     }
 
-    ESP_LOGI(TAG, "Kids English recording auto stop: silence=%d maxDuration=%d durationMs=%lld",
-             silence_timeout, max_duration_timeout, static_cast<long long>(recording_ms));
+    ESP_LOGI(TAG, "Kids English recording auto stop: silence=%d maxDuration=%d durationMs=%d",
+             silence_timeout, max_duration_timeout, static_cast<int>(recording_ms));
     SubmitKidsEnglishRecording();
 #endif
 }

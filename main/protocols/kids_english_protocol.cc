@@ -61,6 +61,7 @@ constexpr int kPracticeAudioChannels = 1;
 constexpr int kPracticeAudioBitsPerSample = 16;
 constexpr int kWsInputFrameDurationMs = 20;
 constexpr int kWsInputFrameSamples = kPracticeAudioSampleRate * kWsInputFrameDurationMs / 1000;
+constexpr int kWsInputFramePaceMs = 5;
 constexpr size_t kWsOutputJitterMinChunks = 3;
 constexpr int kWsOutputJitterMinMs = 750;
 constexpr size_t kWsAudioHeaderBytes = 16;
@@ -394,6 +395,37 @@ bool KidsEnglishProtocol::SendPcmAudio(std::vector<int16_t>&& pcm) {
     }
     pending_pcm_ = std::move(pcm);
     return true;
+}
+
+bool KidsEnglishProtocol::SubmitPcmAudio(std::vector<int16_t>&& pcm) {
+    if (pcm.empty()) {
+        ESP_LOGW(TAG, "No PCM audio captured for current prompt");
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!channel_opened_ || upload_in_progress_) {
+            ESP_LOGW(TAG, "Cannot submit Kids English PCM: channelOpen=%s uploadInProgress=%s",
+                     channel_opened_ ? "true" : "false", upload_in_progress_ ? "true" : "false");
+            return false;
+        }
+        upload_in_progress_ = true;
+    }
+
+    bool ok = UploadPcmAudioForCurrentConversation(std::move(pcm));
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_audio_.clear();
+        pending_pcm_.clear();
+        upload_in_progress_ = false;
+    }
+
+    if (!ok) {
+        SetError(Lang::Strings::SERVER_ERROR);
+    }
+    return ok;
 }
 
 bool KidsEnglishProtocol::GenerateSimulatedRecordingPcm(const std::string& text,
@@ -1458,14 +1490,22 @@ bool KidsEnglishProtocol::IsWebSocketHeartbeatTimedOut() const {
 
 bool KidsEnglishProtocol::UploadPendingAudio() {
     std::vector<int16_t> pcm;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_audio_.clear();
+        pcm = std::move(pending_pcm_);
+    }
+
+    return UploadPcmAudioForCurrentConversation(std::move(pcm));
+}
+
+bool KidsEnglishProtocol::UploadPcmAudioForCurrentConversation(std::vector<int16_t>&& pcm) {
     std::string conversation_id;
     ConversationTransportMode transport;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         conversation_id = conversation_id_;
         transport = selected_transport_;
-        pending_audio_.clear();
-        pcm = std::move(pending_pcm_);
     }
 
     if (conversation_id.empty()) {
@@ -1579,29 +1619,62 @@ bool KidsEnglishProtocol::UploadPcmAudioWebSocket(const std::vector<int16_t>& pc
     cJSON_AddItemToObject(payload, "format", format);
     if (!SendWsTextFrame(BuildWsJsonEnvelope("turn.audio.start", payload, conversation_id,
                                              client_turn_id, true))) {
+        ESP_LOGW(TAG,
+                 "WS_NATIVE_TURN_UPLOAD_FAILED stage=turn_audio_start conversationId=%s "
+                 "clientTurnId=%s",
+                 conversation_id.c_str(), client_turn_id.c_str());
         return false;
     }
+    ESP_LOGI(TAG,
+             "WS_NATIVE_TURN_AUDIO_START_SENT timeMs=%u conversationId=%s clientTurnId=%s "
+             "totalBytes=%u frameBytes=%u paceMs=%d",
+             LogMs(NowMs()), conversation_id.c_str(), client_turn_id.c_str(),
+             (unsigned)(samples_to_send * sizeof(int16_t)),
+             (unsigned)(kWsInputFrameSamples * sizeof(int16_t)), kWsInputFramePaceMs);
 
     const uint8_t* pcm_bytes = reinterpret_cast<const uint8_t*>(pcm.data());
     size_t total_bytes = samples_to_send * sizeof(int16_t);
     size_t offset = 0;
     size_t frame_bytes = kWsInputFrameSamples * sizeof(int16_t);
+    size_t frame_count = 0;
+    int64_t last_progress_ms = NowMs();
     while (offset < total_bytes) {
         size_t chunk_bytes = std::min(frame_bytes, total_bytes - offset);
         bool final_frame = offset + chunk_bytes >= total_bytes;
         if (chunk_bytes == frame_bytes) {
             if (!SendWsAudioFrame(pcm_bytes + offset, chunk_bytes, final_frame)) {
+                ESP_LOGW(TAG,
+                         "WS_NATIVE_TURN_UPLOAD_FAILED stage=binary_audio_frame "
+                         "conversationId=%s clientTurnId=%s offset=%u totalBytes=%u frames=%u",
+                         conversation_id.c_str(), client_turn_id.c_str(), (unsigned)offset,
+                         (unsigned)total_bytes, (unsigned)frame_count);
                 return false;
             }
         } else {
             uint8_t padded_frame[kWsInputFrameSamples * sizeof(int16_t)] = {};
             std::memcpy(padded_frame, pcm_bytes + offset, chunk_bytes);
             if (!SendWsAudioFrame(padded_frame, frame_bytes, final_frame)) {
+                ESP_LOGW(TAG,
+                         "WS_NATIVE_TURN_UPLOAD_FAILED stage=binary_audio_frame_padded "
+                         "conversationId=%s clientTurnId=%s offset=%u totalBytes=%u frames=%u",
+                         conversation_id.c_str(), client_turn_id.c_str(), (unsigned)offset,
+                         (unsigned)total_bytes, (unsigned)frame_count);
                 return false;
             }
         }
+        ++frame_count;
         offset += chunk_bytes;
-        vTaskDelay(pdMS_TO_TICKS(1));
+        int64_t now_ms = NowMs();
+        if (now_ms - last_progress_ms >= 1000 || offset >= total_bytes) {
+            ESP_LOGI(TAG,
+                     "WS_NATIVE_TURN_AUDIO_SEND_PROGRESS timeMs=%u conversationId=%s "
+                     "clientTurnId=%s sentBytes=%u/%u frames=%u final=%s",
+                     LogMs(now_ms), conversation_id.c_str(), client_turn_id.c_str(),
+                     (unsigned)offset, (unsigned)total_bytes, (unsigned)frame_count,
+                     offset >= total_bytes ? "true" : "false");
+            last_progress_ms = now_ms;
+        }
+        vTaskDelay(pdMS_TO_TICKS(kWsInputFramePaceMs));
     }
 
     cJSON* end_payload = cJSON_CreateObject();
@@ -1609,6 +1682,11 @@ bool KidsEnglishProtocol::UploadPcmAudioWebSocket(const std::vector<int16_t>& pc
     cJSON_AddStringToObject(end_payload, "reason", "manual_stop");
     if (!SendWsTextFrame(BuildWsJsonEnvelope("turn.audio.end", end_payload, conversation_id,
                                              client_turn_id))) {
+        ESP_LOGW(TAG,
+                 "WS_NATIVE_TURN_UPLOAD_FAILED stage=turn_audio_end conversationId=%s "
+                 "clientTurnId=%s frames=%u totalBytes=%u",
+                 conversation_id.c_str(), client_turn_id.c_str(), (unsigned)frame_count,
+                 (unsigned)total_bytes);
         return false;
     }
     {
