@@ -22,6 +22,17 @@
 
 #define TAG "Application"
 
+namespace {
+std::string PrintJsonUnformatted(const cJSON* root) {
+    char* printed = cJSON_PrintUnformatted(root);
+    std::string result = printed == nullptr ? "{}" : printed;
+    if (printed != nullptr) {
+        cJSON_free(printed);
+    }
+    return result;
+}
+}  // namespace
+
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
 #ifndef CONFIG_KIDS_ENGLISH_INITIAL_SILENCE_TIMEOUT_MS
 #define CONFIG_KIDS_ENGLISH_INITIAL_SILENCE_TIMEOUT_MS 7000
@@ -370,6 +381,11 @@ void Application::HandleNetworkDisconnectedEvent() {
     auto state = GetDeviceState();
     if (state == kDeviceStateConnecting || state == kDeviceStateListening || state == kDeviceStateSpeaking) {
         ESP_LOGI(TAG, "Closing audio channel due to network disconnection");
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+        if (kids_english_open_channel_task_handle_ != nullptr) {
+            kids_english_reset_protocol_pending_ = true;
+        } else
+#endif
         protocol_->CloseAudioChannel();
     }
 
@@ -608,6 +624,10 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnIncomingJson([this, display](const cJSON* root) {
+        if (root == nullptr) {
+            ESP_LOGW(TAG, "Ignoring null incoming JSON message");
+            return;
+        }
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
         if (!cJSON_IsString(type)) {
@@ -616,6 +636,11 @@ void Application::InitializeProtocol() {
         }
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
+            if (!cJSON_IsString(state)) {
+                ESP_LOGW(TAG, "Ignoring TTS message missing string state: %s",
+                         PrintJsonUnformatted(root).c_str());
+                return;
+            }
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
                     aborted_ = false;
@@ -710,9 +735,9 @@ void Application::InitializeProtocol() {
 #if CONFIG_RECEIVE_CUSTOM_MESSAGE
         } else if (strcmp(type->valuestring, "custom") == 0) {
             auto payload = cJSON_GetObjectItem(root, "payload");
-            ESP_LOGI(TAG, "Received custom message: %s", cJSON_PrintUnformatted(root));
+            ESP_LOGI(TAG, "Received custom message: %s", PrintJsonUnformatted(root).c_str());
             if (cJSON_IsObject(payload)) {
-                Schedule([this, display, payload_str = std::string(cJSON_PrintUnformatted(payload))]() {
+                Schedule([this, display, payload_str = PrintJsonUnformatted(payload)]() {
                     display->SetChatMessage("system", payload_str.c_str());
                 });
             } else {
@@ -973,6 +998,11 @@ void Application::StartKidsEnglishSelfTest() {
             Board::GetInstance().GetDisplay()->ShowNotification("自测已在运行", 2000);
             return;
         }
+        if (kids_english_open_channel_task_handle_ != nullptr) {
+            ESP_LOGW(TAG, "Kids English connection task is running; self-test postponed");
+            Board::GetInstance().GetDisplay()->ShowNotification("连接中，稍后再试", 2000);
+            return;
+        }
 
         ReloadKidsEnglishProtocol();
 
@@ -1000,6 +1030,11 @@ void Application::StartKidsEnglishSelfTest() {
 
 void Application::ReloadKidsEnglishProtocol() {
 #if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (kids_english_open_channel_task_handle_ != nullptr) {
+        ESP_LOGW(TAG, "Kids English connection task is running; deferring protocol reload");
+        kids_english_reload_protocol_pending_ = true;
+        return;
+    }
     if (protocol_ != nullptr) {
         protocol_->CloseAudioChannel(false);
         protocol_.reset();
@@ -1018,6 +1053,7 @@ void Application::SetKidsEnglishEnvironment(KidsEnglishProtocol::Environment env
             return;
         }
         if (kids_english_self_test_task_handle_ != nullptr ||
+            kids_english_open_channel_task_handle_ != nullptr ||
             kids_english_submit_recording_task_handle_ != nullptr ||
             kids_english_simulated_recording_task_handle_ != nullptr) {
             display->ShowNotification("任务运行中，稍后再切换", 2000);
@@ -1111,9 +1147,15 @@ void Application::HandleToggleChatEvent() {
 #endif
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+            Schedule([this, mode]() {
+                StartKidsEnglishOpenAudioChannelTask(mode, "");
+            });
+#else
             Schedule([this, mode]() {
                 ContinueOpenAudioChannel(mode);
             });
+#endif
             return;
         }
         SetListeningMode(mode);
@@ -1140,11 +1182,121 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
 
     if (!protocol_->IsAudioChannelOpened()) {
         if (!protocol_->OpenAudioChannel()) {
+            if (GetDeviceState() == kDeviceStateConnecting) {
+                SetDeviceState(kDeviceStateIdle);
+            }
             return;
         }
     }
 
     SetListeningMode(mode);
+}
+
+bool Application::StartKidsEnglishOpenAudioChannelTask(ListeningMode mode, std::string wake_word) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (GetDeviceState() != kDeviceStateConnecting) {
+        return false;
+    }
+    if (kids_english_open_channel_task_handle_ != nullptr) {
+        ESP_LOGW(TAG, "Kids English connection task already running");
+        Board::GetInstance().GetDisplay()->ShowNotification("连接中");
+        return false;
+    }
+    if (protocol_ == nullptr) {
+        ESP_LOGE(TAG, "Kids English connection failed: protocol not initialized");
+        SetDeviceState(kDeviceStateIdle);
+        return false;
+    }
+    listening_mode_ = mode;
+
+    struct OpenArgs {
+        Application* app;
+        ListeningMode mode;
+        std::string wake_word;
+    };
+    auto args = new OpenArgs{this, mode, std::move(wake_word)};
+    BaseType_t created = xTaskCreate([](void* arg) {
+        std::unique_ptr<OpenArgs> args(static_cast<OpenArgs*>(arg));
+        args->app->KidsEnglishOpenAudioChannelTask(args->mode, std::move(args->wake_word));
+        vTaskDelete(NULL);
+    }, "kids_open_channel", 4096 * 4, args, 3, &kids_english_open_channel_task_handle_);
+    if (created != pdPASS) {
+        delete args;
+        kids_english_open_channel_task_handle_ = nullptr;
+        ESP_LOGE(TAG, "Failed to create Kids English connection task");
+        Board::GetInstance().GetDisplay()->ShowNotification("连接启动失败");
+        SetDeviceState(kDeviceStateIdle);
+        return false;
+    }
+    return true;
+#else
+    (void)mode;
+    (void)wake_word;
+    return false;
+#endif
+}
+
+void Application::KidsEnglishOpenAudioChannelTask(ListeningMode mode, std::string wake_word) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    bool opened = false;
+    auto& board = Board::GetInstance();
+    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+
+    if (protocol_ == nullptr) {
+        ESP_LOGE(TAG, "Kids English connection task failed: protocol not initialized");
+    } else if (GetDeviceState() != kDeviceStateConnecting) {
+        ESP_LOGW(TAG, "Kids English connection task canceled: state=%d",
+                 static_cast<int>(GetDeviceState()));
+    } else if (protocol_->IsAudioChannelOpened()) {
+        opened = true;
+    } else {
+        ESP_LOGI(TAG, "Opening Kids English audio channel in background task");
+        opened = protocol_->OpenAudioChannel();
+        ESP_LOGI(TAG, "Kids English audio channel open finished: ok=%s",
+                 opened ? "true" : "false");
+    }
+
+    Schedule([this, mode, wake_word = std::move(wake_word), opened]() {
+        kids_english_open_channel_task_handle_ = nullptr;
+        kids_english_submission_waiting_for_response_ = false;
+        if (kids_english_reload_protocol_pending_ || kids_english_reset_protocol_pending_) {
+            bool should_reload = kids_english_reload_protocol_pending_;
+            kids_english_reload_protocol_pending_ = false;
+            kids_english_reset_protocol_pending_ = false;
+            if (protocol_ != nullptr) {
+                protocol_->CloseAudioChannel(false);
+                protocol_.reset();
+            }
+            if (GetDeviceState() == kDeviceStateConnecting) {
+                SetDeviceState(kDeviceStateIdle);
+            }
+            if (should_reload) {
+                InitializeProtocol();
+            }
+            return;
+        }
+        if (!opened) {
+            auto state = GetDeviceState();
+            if (state == kDeviceStateConnecting || state == kDeviceStateListening ||
+                state == kDeviceStateSpeaking) {
+                SetDeviceState(kDeviceStateIdle);
+            }
+            Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+            Board::GetInstance().GetDisplay()->ShowNotification(Lang::Strings::SERVER_NOT_CONNECTED);
+            return;
+        }
+        if (wake_word.empty()) {
+            if (GetDeviceState() == kDeviceStateConnecting) {
+                SetListeningMode(mode);
+            }
+        } else {
+            FinishWakeWordInvoke(wake_word);
+        }
+    });
+#else
+    (void)mode;
+    (void)wake_word;
+#endif
 }
 
 void Application::HandleStartListeningEvent() {
@@ -1171,9 +1323,15 @@ void Application::HandleStartListeningEvent() {
 #endif
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+            Schedule([this]() {
+                StartKidsEnglishOpenAudioChannelTask(kListeningModeManualStop, "");
+            });
+#else
             Schedule([this]() {
                 ContinueOpenAudioChannel(kListeningModeManualStop);
             });
+#endif
             return;
         }
         SetListeningMode(kListeningModeManualStop);
@@ -1222,9 +1380,15 @@ void Application::HandleWakeWordDetectedEvent() {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update),
             // then continue with OpenAudioChannel which may block for ~1 second
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+            Schedule([this, wake_word]() {
+                StartKidsEnglishOpenAudioChannelTask(GetDefaultListeningMode(), wake_word);
+            });
+#else
             Schedule([this, wake_word]() {
                 ContinueWakeWordInvoke(wake_word);
             });
+#endif
             return;
         }
         // Channel already opened, continue directly
@@ -1264,10 +1428,17 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     if (!protocol_->IsAudioChannelOpened()) {
         if (!protocol_->OpenAudioChannel()) {
             audio_service_.EnableWakeWordDetection(true);
+            if (GetDeviceState() == kDeviceStateConnecting) {
+                SetDeviceState(kDeviceStateIdle);
+            }
             return;
         }
     }
 
+    FinishWakeWordInvoke(wake_word);
+}
+
+void Application::FinishWakeWordInvoke(const std::string& wake_word) {
     ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
 #if CONFIG_SEND_WAKE_WORD_DATA
     // Encode and send the wake word data to the server
@@ -1902,10 +2073,20 @@ ListeningMode Application::GetDefaultListeningMode() const {
 void Application::Reboot() {
     ESP_LOGI(TAG, "Rebooting...");
     // Disconnect the audio channel
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (kids_english_open_channel_task_handle_ != nullptr) {
+        kids_english_reset_protocol_pending_ = true;
+    } else
+#endif
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
         protocol_->CloseAudioChannel();
     }
-    protocol_.reset();
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (kids_english_open_channel_task_handle_ == nullptr)
+#endif
+    {
+        protocol_.reset();
+    }
     audio_service_.Stop();
 
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -1918,6 +2099,14 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
 
     std::string upgrade_url = url;
     std::string version_info = version.empty() ? "(Manual upgrade)" : version;
+
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (kids_english_open_channel_task_handle_ != nullptr) {
+        ESP_LOGW(TAG, "Firmware upgrade postponed: Kids English connection task is running");
+        display->ShowNotification("连接中，稍后升级", 2000);
+        return false;
+    }
+#endif
 
     // Close audio channel if it's open
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
@@ -1975,11 +2164,20 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
         audio_service_.EncodeWakeWord();
 
         if (!protocol_->IsAudioChannelOpened()) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+            static_cast<KidsEnglishProtocol*>(protocol_.get())->SetNextConversationTrigger("wake_word");
+#endif
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+            Schedule([this, wake_word]() {
+                StartKidsEnglishOpenAudioChannelTask(GetDefaultListeningMode(), wake_word);
+            });
+#else
             Schedule([this, wake_word]() {
                 ContinueWakeWordInvoke(wake_word);
             });
+#endif
             return;
         }
         // Channel already opened, continue directly
@@ -2063,6 +2261,12 @@ void Application::PlaySound(const std::string_view& sound) {
 
 void Application::ResetProtocol() {
     Schedule([this]() {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+        if (kids_english_open_channel_task_handle_ != nullptr) {
+            kids_english_reset_protocol_pending_ = true;
+            return;
+        }
+#endif
         // Close audio channel if opened
         if (protocol_ && protocol_->IsAudioChannelOpened()) {
             protocol_->CloseAudioChannel();

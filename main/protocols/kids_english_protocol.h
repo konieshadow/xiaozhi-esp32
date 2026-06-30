@@ -159,6 +159,10 @@ private:
     bool channel_opened_ = false;
     bool upload_in_progress_ = false;
     bool self_test_in_progress_ = false;
+    bool pending_tts_stop_ = false;
+    std::string pending_tts_stop_text_;
+    std::string pending_tts_stop_end_reason_;
+    bool pending_tts_stop_continue_listening_ = true;
     ConversationTransportMode selected_transport_ = ConversationTransportMode::kHttp;
     WebSocketTransportConfig ws_config_;
     std::unique_ptr<WebSocket> websocket_;
@@ -258,7 +262,12 @@ private:
     bool ClearServerEndedConversation(const char* reason);
     bool WaitForWsUrlAudioIfNeeded(int timeout_ms);
     bool HandleConversationResponse(const ConversationResponse& response, const char* fallback_text,
-                                    bool wait_for_playback = false);
+                                    bool wait_for_playback = false, bool defer_tts_stop = false);
+    void QueuePendingTtsStop(const std::string& text, bool continue_listening,
+                             const char* end_reason = nullptr);
+    void FlushPendingTtsStop();
+    void EmitConversationStop(const std::string& text, bool continue_listening,
+                              const char* end_reason);
     bool HandleWsAudioPlayback();
     bool HandleWsAudioUrl(const std::string& url);
     void HandleWsAudioUrlAsync(const std::string& url);

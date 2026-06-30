@@ -158,6 +158,7 @@ private:
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
+    TaskHandle_t kids_english_open_channel_task_handle_ = nullptr;
     TaskHandle_t kids_english_self_test_task_handle_ = nullptr;
     TaskHandle_t kids_english_submit_recording_task_handle_ = nullptr;
     TaskHandle_t kids_english_simulated_recording_task_handle_ = nullptr;
@@ -168,6 +169,8 @@ private:
     bool kids_english_recording_has_voice_ = false;
     bool kids_english_simulated_recording_active_ = false;
     bool kids_english_simulated_submit_requested_ = false;
+    bool kids_english_reload_protocol_pending_ = false;
+    bool kids_english_reset_protocol_pending_ = false;
     void ReloadKidsEnglishProtocol();
     bool kids_english_submission_waiting_for_response_ = false;
     int kids_english_daily_conversation_count_ = 0;
@@ -187,6 +190,9 @@ private:
     void HandleWakeWordDetectedEvent();
     void ContinueOpenAudioChannel(ListeningMode mode);
     void ContinueWakeWordInvoke(const std::string& wake_word);
+    void FinishWakeWordInvoke(const std::string& wake_word);
+    bool StartKidsEnglishOpenAudioChannelTask(ListeningMode mode, std::string wake_word);
+    void KidsEnglishOpenAudioChannelTask(ListeningMode mode, std::string wake_word);
     void SubmitKidsEnglishRecording();
     void CancelKidsEnglishRecording(const char* reason);
     bool StartKidsEnglishRecordingSubmission(std::vector<int16_t>&& pcm, const char* source);
