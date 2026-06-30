@@ -923,6 +923,44 @@ config KIDS_ENGLISH_END_SILENCE_TIMEOUT_MS
         WAV in the HTTP conversation flow. Lower values reduce perceived
         latency but can cut off trailing speech in noisy rooms.
 
+config KIDS_ENGLISH_SPEECH_GRACE_PERIOD_MS
+    int "Kids English speech grace period (ms)"
+    default 400
+    range 0 2000
+    depends on USE_KIDS_ENGLISH_SERVER
+    help
+        Ignore VAD speech at the very beginning of a recording. This absorbs
+        touch sounds, prompt tail audio, and short ambient speech bursts before
+        the child has had a chance to answer.
+
+config KIDS_ENGLISH_SPEECH_CONFIRMATION_MS
+    int "Kids English speech confirmation duration (ms)"
+    default 300
+    range 100 2000
+    depends on USE_KIDS_ENGLISH_SERVER
+    help
+        Continuous local VAD speech required before the firmware treats a
+        recording as having valid user speech.
+
+config KIDS_ENGLISH_MIN_VALID_SPEECH_MS
+    int "Kids English minimum valid speech duration (ms)"
+    default 700
+    range 100 3000
+    depends on USE_KIDS_ENGLISH_SERVER
+    help
+        Minimum confirmed speech duration required before an automatic VAD stop
+        uploads the WAV. Shorter speech is canceled as noise instead.
+
+config KIDS_ENGLISH_AMBIENT_FORCE_STOP_MS
+    int "Kids English ambient speech force-stop duration (ms)"
+    default 6000
+    range 1000 10000
+    depends on USE_KIDS_ENGLISH_SERVER
+    help
+        Safety duration after confirmed speech starts. If VAD keeps reporting
+        speech without a usable silence gap, stop and submit anyway so nearby
+        voices cannot leave the device stuck in recording.
+
 config KIDS_ENGLISH_MAX_RECORDING_DURATION_MS
     int "Kids English max recording duration (ms)"
     default 10000

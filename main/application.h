@@ -167,6 +167,8 @@ private:
     std::string kids_english_simulated_recording_text_;
     bool kids_english_recording_detector_active_ = false;
     bool kids_english_recording_has_voice_ = false;
+    bool kids_english_recording_vad_speaking_ = false;
+    bool kids_english_recording_ignore_current_speech_ = false;
     bool kids_english_simulated_recording_active_ = false;
     bool kids_english_simulated_submit_requested_ = false;
     bool kids_english_reload_protocol_pending_ = false;
@@ -177,6 +179,10 @@ private:
     int kids_english_daily_conversation_yday_ = -1;
     int64_t kids_english_recording_started_at_ms_ = 0;
     int64_t kids_english_recording_silence_started_at_ms_ = 0;
+    int64_t kids_english_recording_speech_candidate_started_at_ms_ = 0;
+    int64_t kids_english_recording_confirmed_speech_started_at_ms_ = 0;
+    int64_t kids_english_recording_confirmed_voice_started_at_ms_ = 0;
+    int64_t kids_english_recording_valid_speech_ms_ = 0;
 
 
     // Event handlers

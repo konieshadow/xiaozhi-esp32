@@ -40,6 +40,18 @@ std::string PrintJsonUnformatted(const cJSON* root) {
 #ifndef CONFIG_KIDS_ENGLISH_END_SILENCE_TIMEOUT_MS
 #define CONFIG_KIDS_ENGLISH_END_SILENCE_TIMEOUT_MS 800
 #endif
+#ifndef CONFIG_KIDS_ENGLISH_SPEECH_GRACE_PERIOD_MS
+#define CONFIG_KIDS_ENGLISH_SPEECH_GRACE_PERIOD_MS 400
+#endif
+#ifndef CONFIG_KIDS_ENGLISH_SPEECH_CONFIRMATION_MS
+#define CONFIG_KIDS_ENGLISH_SPEECH_CONFIRMATION_MS 300
+#endif
+#ifndef CONFIG_KIDS_ENGLISH_MIN_VALID_SPEECH_MS
+#define CONFIG_KIDS_ENGLISH_MIN_VALID_SPEECH_MS 700
+#endif
+#ifndef CONFIG_KIDS_ENGLISH_AMBIENT_FORCE_STOP_MS
+#define CONFIG_KIDS_ENGLISH_AMBIENT_FORCE_STOP_MS 6000
+#endif
 #ifndef CONFIG_KIDS_ENGLISH_MAX_RECORDING_DURATION_MS
 #define CONFIG_KIDS_ENGLISH_MAX_RECORDING_DURATION_MS 10000
 #endif
@@ -48,6 +60,13 @@ namespace {
 constexpr int64_t kKidsEnglishInitialSilenceTimeoutMs =
     CONFIG_KIDS_ENGLISH_INITIAL_SILENCE_TIMEOUT_MS;
 constexpr int64_t kKidsEnglishEndSilenceTimeoutMs = CONFIG_KIDS_ENGLISH_END_SILENCE_TIMEOUT_MS;
+constexpr int64_t kKidsEnglishSpeechGracePeriodMs =
+    CONFIG_KIDS_ENGLISH_SPEECH_GRACE_PERIOD_MS;
+constexpr int64_t kKidsEnglishSpeechConfirmationMs =
+    CONFIG_KIDS_ENGLISH_SPEECH_CONFIRMATION_MS;
+constexpr int64_t kKidsEnglishMinValidSpeechMs = CONFIG_KIDS_ENGLISH_MIN_VALID_SPEECH_MS;
+constexpr int64_t kKidsEnglishAmbientForceStopMs =
+    CONFIG_KIDS_ENGLISH_AMBIENT_FORCE_STOP_MS;
 constexpr int64_t kKidsEnglishMaxRecordingDurationMs =
     CONFIG_KIDS_ENGLISH_MAX_RECORDING_DURATION_MS;
 constexpr int64_t kKidsEnglishRecordingCheckIntervalMs = 100;
@@ -1628,8 +1647,14 @@ void Application::StartKidsEnglishRecordingDetection() {
     int64_t now_ms = esp_timer_get_time() / 1000;
     kids_english_recording_detector_active_ = true;
     kids_english_recording_has_voice_ = false;
+    kids_english_recording_vad_speaking_ = false;
+    kids_english_recording_ignore_current_speech_ = false;
     kids_english_recording_started_at_ms_ = now_ms;
     kids_english_recording_silence_started_at_ms_ = now_ms;
+    kids_english_recording_speech_candidate_started_at_ms_ = 0;
+    kids_english_recording_confirmed_speech_started_at_ms_ = 0;
+    kids_english_recording_confirmed_voice_started_at_ms_ = 0;
+    kids_english_recording_valid_speech_ms_ = 0;
     StartKidsEnglishRecordingCheckTimer();
     ESP_LOGI(TAG, "Kids English recording detector started");
 #endif
@@ -1642,8 +1667,14 @@ void Application::StopKidsEnglishRecordingDetection() {
     }
     kids_english_recording_detector_active_ = false;
     kids_english_recording_has_voice_ = false;
+    kids_english_recording_vad_speaking_ = false;
+    kids_english_recording_ignore_current_speech_ = false;
     kids_english_recording_started_at_ms_ = 0;
     kids_english_recording_silence_started_at_ms_ = 0;
+    kids_english_recording_speech_candidate_started_at_ms_ = 0;
+    kids_english_recording_confirmed_speech_started_at_ms_ = 0;
+    kids_english_recording_confirmed_voice_started_at_ms_ = 0;
+    kids_english_recording_valid_speech_ms_ = 0;
     StopKidsEnglishRecordingCheckTimer();
     ESP_LOGI(TAG, "Kids English recording detector stopped");
 #endif
@@ -1681,14 +1712,38 @@ void Application::HandleKidsEnglishVadChange(bool speaking) {
 
     int64_t now_ms = esp_timer_get_time() / 1000;
     if (speaking) {
-        if (!kids_english_recording_has_voice_) {
-            ESP_LOGI(TAG, "Kids English recording detected speech");
+        kids_english_recording_vad_speaking_ = true;
+        int64_t elapsed_ms = now_ms - kids_english_recording_started_at_ms_;
+        if (elapsed_ms < kKidsEnglishSpeechGracePeriodMs) {
+            if (!kids_english_recording_ignore_current_speech_) {
+                ESP_LOGI(TAG, "Kids English recording ignoring early VAD speech: elapsedMs=%d",
+                         static_cast<int>(elapsed_ms));
+            }
+            kids_english_recording_ignore_current_speech_ = true;
+            kids_english_recording_speech_candidate_started_at_ms_ = 0;
+            return;
         }
-        kids_english_recording_has_voice_ = true;
-        kids_english_recording_silence_started_at_ms_ = 0;
+        if (kids_english_recording_ignore_current_speech_) {
+            ESP_LOGD(TAG, "Kids English recording waiting for early speech to end");
+            return;
+        }
+        if (kids_english_recording_speech_candidate_started_at_ms_ == 0) {
+            kids_english_recording_speech_candidate_started_at_ms_ = now_ms;
+            ESP_LOGI(TAG, "Kids English recording VAD speech candidate started: elapsedMs=%d",
+                     static_cast<int>(elapsed_ms));
+        }
     } else {
+        if (kids_english_recording_confirmed_speech_started_at_ms_ > 0) {
+            kids_english_recording_valid_speech_ms_ +=
+                now_ms - kids_english_recording_confirmed_speech_started_at_ms_;
+            kids_english_recording_confirmed_speech_started_at_ms_ = 0;
+        }
+        kids_english_recording_vad_speaking_ = false;
+        kids_english_recording_ignore_current_speech_ = false;
+        kids_english_recording_speech_candidate_started_at_ms_ = 0;
         kids_english_recording_silence_started_at_ms_ = now_ms;
-        ESP_LOGI(TAG, "Kids English recording detected silence");
+        ESP_LOGI(TAG, "Kids English recording detected silence: validSpeechMs=%d",
+                 static_cast<int>(kids_english_recording_valid_speech_ms_));
     }
 #else
     (void)speaking;
@@ -1711,6 +1766,35 @@ void Application::CheckKidsEnglishRecordingAutoStop() {
 
     int64_t now_ms = esp_timer_get_time() / 1000;
     int64_t recording_ms = now_ms - kids_english_recording_started_at_ms_;
+    if (kids_english_recording_vad_speaking_ &&
+        !kids_english_recording_ignore_current_speech_) {
+        bool grace_elapsed = recording_ms >= kKidsEnglishSpeechGracePeriodMs;
+        int64_t speech_candidate_ms =
+            kids_english_recording_speech_candidate_started_at_ms_ > 0
+                ? now_ms - kids_english_recording_speech_candidate_started_at_ms_
+                : 0;
+        bool speech_confirmed = speech_candidate_ms >= kKidsEnglishSpeechConfirmationMs;
+        if (!grace_elapsed) {
+            ESP_LOGD(TAG, "Kids English recording ignoring early speech: elapsedMs=%d graceMs=%d",
+                     static_cast<int>(recording_ms),
+                     static_cast<int>(kKidsEnglishSpeechGracePeriodMs));
+        } else if (speech_confirmed) {
+            if (!kids_english_recording_has_voice_) {
+                kids_english_recording_has_voice_ = true;
+                kids_english_recording_confirmed_voice_started_at_ms_ =
+                    kids_english_recording_speech_candidate_started_at_ms_;
+                ESP_LOGI(TAG,
+                         "Kids English recording confirmed speech: candidateMs=%d elapsedMs=%d",
+                         static_cast<int>(speech_candidate_ms), static_cast<int>(recording_ms));
+            }
+            if (kids_english_recording_confirmed_speech_started_at_ms_ == 0) {
+                kids_english_recording_confirmed_speech_started_at_ms_ =
+                    kids_english_recording_speech_candidate_started_at_ms_;
+            }
+            kids_english_recording_silence_started_at_ms_ = 0;
+        }
+    }
+
     if (!kids_english_recording_has_voice_) {
         if (recording_ms >= kKidsEnglishInitialSilenceTimeoutMs) {
             ESP_LOGW(TAG, "Kids English recording timed out waiting for speech");
@@ -1720,16 +1804,37 @@ void Application::CheckKidsEnglishRecordingAutoStop() {
         return;
     }
 
-    bool silence_timeout =
-        kids_english_recording_silence_started_at_ms_ > 0 &&
-        now_ms - kids_english_recording_silence_started_at_ms_ >= kKidsEnglishEndSilenceTimeoutMs;
+    bool silence_timeout = !kids_english_recording_vad_speaking_ &&
+                           kids_english_recording_silence_started_at_ms_ > 0 &&
+                           now_ms - kids_english_recording_silence_started_at_ms_ >=
+                               kKidsEnglishEndSilenceTimeoutMs;
+    int64_t valid_speech_ms = kids_english_recording_valid_speech_ms_;
+    if (kids_english_recording_confirmed_speech_started_at_ms_ > 0) {
+        valid_speech_ms += now_ms - kids_english_recording_confirmed_speech_started_at_ms_;
+    }
+    if (silence_timeout && valid_speech_ms < kKidsEnglishMinValidSpeechMs) {
+        ESP_LOGW(TAG,
+                 "Kids English recording canceled short speech: validSpeechMs=%d minSpeechMs=%d",
+                 static_cast<int>(valid_speech_ms),
+                 static_cast<int>(kKidsEnglishMinValidSpeechMs));
+        Board::GetInstance().GetDisplay()->ShowNotification("未检测到有效语音", 2000);
+        CancelKidsEnglishRecording("short_speech");
+        return;
+    }
+    bool ambient_force_stop =
+        kids_english_recording_confirmed_voice_started_at_ms_ > 0 &&
+        now_ms - kids_english_recording_confirmed_voice_started_at_ms_ >=
+            kKidsEnglishAmbientForceStopMs;
     bool max_duration_timeout = recording_ms >= kKidsEnglishMaxRecordingDurationMs;
-    if (!silence_timeout && !max_duration_timeout) {
+    if (!silence_timeout && !ambient_force_stop && !max_duration_timeout) {
         return;
     }
 
-    ESP_LOGI(TAG, "Kids English recording auto stop: silence=%d maxDuration=%d durationMs=%d",
-             silence_timeout, max_duration_timeout, static_cast<int>(recording_ms));
+    ESP_LOGI(TAG,
+             "Kids English recording auto stop: silence=%d ambientForce=%d maxDuration=%d "
+             "durationMs=%d validSpeechMs=%d",
+             silence_timeout, ambient_force_stop, max_duration_timeout,
+             static_cast<int>(recording_ms), static_cast<int>(valid_speech_ms));
     SubmitKidsEnglishRecording();
 #endif
 }
@@ -1902,9 +2007,18 @@ bool Application::AppendKidsEnglishSimulatedRecordingSegment(const std::string& 
         kids_english_simulated_recording_active_ = true;
         kids_english_recording_detector_active_ = true;
         kids_english_recording_has_voice_ = true;
+        kids_english_recording_vad_speaking_ = false;
+        kids_english_recording_ignore_current_speech_ = false;
         if (kids_english_recording_started_at_ms_ == 0) {
             kids_english_recording_started_at_ms_ = now_ms;
         }
+        if (kids_english_recording_confirmed_voice_started_at_ms_ == 0) {
+            kids_english_recording_confirmed_voice_started_at_ms_ = now_ms;
+        }
+        kids_english_recording_speech_candidate_started_at_ms_ = 0;
+        kids_english_recording_confirmed_speech_started_at_ms_ = 0;
+        kids_english_recording_valid_speech_ms_ =
+            kids_english_simulated_recording_pcm_.size() * 1000 / 16000;
         kids_english_recording_silence_started_at_ms_ = now_ms;
         StartKidsEnglishRecordingCheckTimer();
         total_samples = kids_english_simulated_recording_pcm_.size();
