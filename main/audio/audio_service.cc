@@ -748,6 +748,14 @@ void AudioService::WaitForPlaybackQueueEmpty() {
     });
 }
 
+bool AudioService::WaitForPlaybackQueueEmpty(int timeout_ms) {
+    std::unique_lock<std::mutex> lock(audio_queue_mutex_);
+    return audio_queue_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this]() {
+        return service_stopped_ ||
+               (audio_decode_queue_.empty() && audio_playback_queue_.empty() && !playback_active_);
+    });
+}
+
 void AudioService::ResetDecoder() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     std::unique_lock<std::mutex> decoder_lock(decoder_mutex_);

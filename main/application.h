@@ -205,6 +205,7 @@ private:
     bool StartKidsEnglishSimulatedRecordingTask();
     void MaybeStartKidsEnglishSelfTest();
     void KidsEnglishSelfTestTask();
+    void FinishKidsEnglishSelfTest(bool passed);
     void KidsEnglishSubmitRecordingTask(std::vector<int16_t> pcm);
     void KidsEnglishSimulatedRecordingTask(std::string text);
     bool AppendKidsEnglishSimulatedRecordingSegment(const std::string& text,

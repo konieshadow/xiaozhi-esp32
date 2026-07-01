@@ -113,21 +113,40 @@ private:
         int input_frame_duration_ms = 20;
         int output_sample_rate_hz = 16000;
         int output_channels = 1;
+        int output_max_chunk_bytes = -1;
+        int output_pacing_ms = -1;
+        int output_backpressure_high_water_bytes = -1;
+        int output_backpressure_low_water_bytes = -1;
+        bool feature_asr_partial = false;
+        bool feature_asr_speech_endpoint = false;
+        bool feature_server_vad_auto_end = false;
     };
 
     struct WsTurnMetrics {
         bool active = false;
         bool turn_complete = false;
         bool fallback_requested = false;
+        bool input_audio_active = false;
+        bool turn_audio_end_sent = false;
+        bool server_auto_end_received = false;
+        bool speech_started_received = false;
+        bool speech_stopped_received = false;
+        bool late_turn_end_suppressed = false;
         bool playback_started_sent = false;
         bool playback_finished_sent = false;
         bool output_audio_active = false;
         std::string fallback_reason;
+        std::string input_stop_reason;
+        std::string server_auto_end_reason;
         std::string conversation_id;
         std::string client_turn_id;
         std::string server_turn_id;
         int64_t turn_begin_ms = 0;
+        int64_t input_stopped_ms = 0;
         int64_t audio_submitted_ms = 0;
+        int64_t speech_started_ms = 0;
+        int64_t speech_stopped_ms = 0;
+        int64_t server_auto_end_ms = 0;
         int64_t assistant_audio_start_ms = 0;
         int64_t first_binary_frame_ms = 0;
         int64_t first_pcm_queue_ms = 0;
@@ -136,6 +155,10 @@ private:
         int64_t binary_end_ms = 0;
         int64_t turn_complete_ms = 0;
         int64_t playback_finished_ms = 0;
+        size_t input_audio_bytes_sent = 0;
+        size_t input_audio_frames_sent = 0;
+        size_t input_late_frames_suppressed = 0;
+        size_t input_late_bytes_suppressed = 0;
         size_t audio_bytes = 0;
         size_t audio_chunks = 0;
         size_t queue_peak_depth = 0;
@@ -147,6 +170,10 @@ private:
         uint32_t underruns = 0;
         uint32_t jitter_rebuffers = 0;
         uint32_t jitter_releases = 0;
+        uint32_t input_last_seq = 0;
+        int speech_started_seq = -1;
+        int speech_stopped_seq = -1;
+        int server_auto_end_seq = -1;
     };
 
     std::string base_url_;
@@ -165,7 +192,7 @@ private:
     bool pending_tts_stop_continue_listening_ = true;
     ConversationTransportMode selected_transport_ = ConversationTransportMode::kHttp;
     WebSocketTransportConfig ws_config_;
-    std::unique_ptr<WebSocket> websocket_;
+    std::shared_ptr<WebSocket> websocket_;
     EventGroupHandle_t ws_event_group_ = nullptr;
     uint32_t ws_next_seq_ = 0;
     bool ws_closing_ = false;
@@ -222,6 +249,8 @@ private:
     std::string CurrentIsoTimestamp() const;
     void UpdateServerTimeOffset(const cJSON* server_time);
     void LogDeviceHelloResponse(const cJSON* root) const;
+    void LogWsOutputAudioConfig(const char* source, const WebSocketTransportConfig& config) const;
+    void ParseWsOutputAudioConfig(const cJSON* output_audio, WebSocketTransportConfig& config) const;
     void ParseConversationTransport(const cJSON* root);
     bool CheckHealth();
     bool DeviceHello();
@@ -235,7 +264,11 @@ private:
     bool SendWsPlaybackEvent(const char* type, const std::string& conversation_id,
                              const std::string& turn_id);
     bool SendWsTextFrame(const std::string& text);
-    bool SendWsAudioFrame(const uint8_t* payload, size_t len, bool end_of_segment);
+    bool SendWsAudioFrame(const uint8_t* payload, size_t len, bool end_of_segment,
+                          uint32_t* sent_seq = nullptr);
+    bool SendWsTurnAudioEndIfNeeded(const std::string& conversation_id,
+                                    const std::string& client_turn_id, const char* reason,
+                                    const char* source);
     uint32_t NextWsSeq();
     void CloseWebSocket();
     bool IsWebSocketConnectedLocked() const;
@@ -279,7 +312,13 @@ private:
     int WsJitterBufferDurationMsLocked() const;
     void ResetWsTurnMetricsLocked();
     void LogWsTurnMetricsLocked(const char* reason) const;
+    bool IsCurrentWsTurnEventLocked(const std::string& conversation_id,
+                                    const std::string& client_turn_id) const;
+    int WsInputDurationMsLocked() const;
+    bool IsWsPlaybackFinishedForWaitLocked() const;
+    bool WaitForWsPlaybackFinished(const char* step, unsigned turn, int timeout_ms);
     void TrySendWsPlaybackFinished(const char* reason);
+    void MaybeEmitWsTtsStopAfterPlayback(const char* reason);
     int64_t NowMs() const;
     std::string ResolveAudioUrl(const std::string& url) const;
     std::string RedactUrlForLog(const std::string& url) const;
@@ -290,6 +329,8 @@ private:
     void HandleWsAssistantAudioStart(const cJSON* root);
     void HandleWsAssistantAudioEnd(const cJSON* root);
     void HandleWsTurnComplete(const cJSON* root);
+    void HandleWsAsrSpeechEndpoint(const cJSON* root, bool stopped);
+    void HandleWsTurnAudioAutoEnd(const cJSON* root);
     void HandleWsServerFallback(const cJSON* root);
     void HandleWsError(const cJSON* root);
     void MarkWebSocketFallback();

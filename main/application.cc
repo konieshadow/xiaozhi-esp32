@@ -70,6 +70,7 @@ constexpr int64_t kKidsEnglishAmbientForceStopMs =
 constexpr int64_t kKidsEnglishMaxRecordingDurationMs =
     CONFIG_KIDS_ENGLISH_MAX_RECORDING_DURATION_MS;
 constexpr int64_t kKidsEnglishRecordingCheckIntervalMs = 100;
+constexpr int kKidsEnglishSelfTestPlaybackDrainTimeoutMs = 30000;
 }  // namespace
 #endif
 
@@ -1031,7 +1032,6 @@ void Application::StartKidsEnglishSelfTest() {
         auto created = xTaskCreate([](void* arg) {
             Application* app = static_cast<Application*>(arg);
             app->KidsEnglishSelfTestTask();
-            app->kids_english_self_test_task_handle_ = nullptr;
             vTaskDelete(NULL);
         }, "kids_self_test", 4096 * 2, this, 3, &kids_english_self_test_task_handle_);
         if (created != pdPASS) {
@@ -1863,19 +1863,31 @@ void Application::KidsEnglishSelfTestTask() {
         auto& board = Board::GetInstance();
         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
         passed = static_cast<KidsEnglishProtocol*>(protocol_.get())->RunSelfTest();
-        audio_service_.WaitForPlaybackQueueEmpty();
+        if (!audio_service_.WaitForPlaybackQueueEmpty(kKidsEnglishSelfTestPlaybackDrainTimeoutMs)) {
+            ESP_LOGE(TAG,
+                     "KIDS_ENGLISH_SELF_TEST_FAIL step=playback_drain reason=timeout timeoutMs=%d",
+                     kKidsEnglishSelfTestPlaybackDrainTimeoutMs);
+            passed = false;
+        }
         if (protocol_->IsAudioChannelOpened()) {
             protocol_->CloseAudioChannel(false);
         }
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
     }
 
-    Schedule([this, passed]() {
-        auto display = Board::GetInstance().GetDisplay();
-        display->SetChatMessage("system", passed ? "Kids English self-test passed"
-                                                 : "Kids English self-test failed");
-        SetDeviceState(kDeviceStateIdle);
-    });
+    Schedule([this, passed]() { FinishKidsEnglishSelfTest(passed); });
+#endif
+}
+
+void Application::FinishKidsEnglishSelfTest(bool passed) {
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    auto display = Board::GetInstance().GetDisplay();
+    display->SetChatMessage("system", passed ? "Kids English self-test passed"
+                                             : "Kids English self-test failed");
+    kids_english_self_test_task_handle_ = nullptr;
+    SetDeviceState(kDeviceStateIdle);
+#else
+    (void)passed;
 #endif
 }
 
