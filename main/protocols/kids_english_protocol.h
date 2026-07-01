@@ -6,8 +6,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 
-#include <cstdint>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -36,6 +36,7 @@ public:
     bool GenerateSimulatedRecordingPcm(const std::string& text, std::vector<int16_t>& pcm);
     bool RunSelfTest();
     void SetNextConversationTrigger(const std::string& trigger);
+    void PrefetchWelcomeAudioAsync(bool refresh_device_hello = false);
     void SendStartListening(ListeningMode mode) override;
     void SendStopListening() override;
     static Environment GetConfiguredEnvironment();
@@ -66,6 +67,25 @@ private:
         int total_duration_ms = -1;
         bool provider_fallback = false;
         std::string provider_error_code;
+        bool welcome_audio_cached = false;
+        std::string welcome_audio_cache_key;
+    };
+
+    struct WelcomeAudioCandidate {
+        std::string id;
+        std::string tts_text;
+        std::string tts_audio_url;
+        std::string audio_format;
+        std::string status;
+        std::string cache_key;
+        std::string voice;
+    };
+
+    struct WelcomeAudioCacheEntry {
+        std::string cache_key;
+        std::string voice;
+        std::vector<int16_t> pcm;
+        int sample_rate = 0;
     };
 
     struct StandaloneTtsResponse {
@@ -131,12 +151,15 @@ private:
         bool server_auto_end_received = false;
         bool speech_started_received = false;
         bool speech_stopped_received = false;
+        bool turn_audio_end_requested = false;
         bool late_turn_end_suppressed = false;
         bool playback_started_sent = false;
         bool playback_finished_sent = false;
         bool output_audio_active = false;
         std::string fallback_reason;
         std::string input_stop_reason;
+        std::string turn_audio_end_request_reason;
+        std::string turn_audio_end_request_source;
         std::string server_auto_end_reason;
         std::string conversation_id;
         std::string client_turn_id;
@@ -146,6 +169,7 @@ private:
         int64_t audio_submitted_ms = 0;
         int64_t speech_started_ms = 0;
         int64_t speech_stopped_ms = 0;
+        int64_t turn_audio_end_requested_ms = 0;
         int64_t server_auto_end_ms = 0;
         int64_t assistant_audio_start_ms = 0;
         int64_t first_binary_frame_ms = 0;
@@ -208,6 +232,11 @@ private:
     bool ws_output_playback_queue_drained_ = false;
     bool ws_tts_playback_started_ = false;
     bool ws_url_audio_in_progress_ = false;
+    bool welcome_audio_prefetch_in_progress_ = false;
+    bool welcome_audio_prefetch_pending_ = false;
+    bool welcome_audio_refresh_requested_ = false;
+    bool welcome_audio_destroying_ = false;
+    std::string welcome_audio_voice_;
     std::string ws_output_audio_transport_;
     std::string ws_output_audio_format_;
     std::string ws_output_audio_url_;
@@ -222,9 +251,12 @@ private:
     size_t ws_output_jitter_samples_ = 0;
     std::vector<std::vector<int16_t>> ws_output_jitter_chunks_;
     WsTurnMetrics ws_turn_metrics_;
+    std::vector<WelcomeAudioCandidate> welcome_audio_candidates_;
+    std::vector<WelcomeAudioCacheEntry> welcome_audio_cache_;
     std::vector<std::unique_ptr<AudioStreamPacket>> pending_audio_;
     std::vector<int16_t> pending_pcm_;
     mutable std::mutex mutex_;
+    mutable std::mutex ws_send_mutex_;
 
     std::string BuildUrl(const char* path) const;
     bool RequestJson(const std::string& method, const std::string& path, const std::string& body,
@@ -249,11 +281,22 @@ private:
     std::string CurrentIsoTimestamp() const;
     void UpdateServerTimeOffset(const cJSON* server_time);
     void LogDeviceHelloResponse(const cJSON* root) const;
+    std::vector<WelcomeAudioCandidate> ParseWelcomeAudioCandidates(const cJSON* root) const;
+    void StoreWelcomeAudioCandidates(std::vector<WelcomeAudioCandidate>&& candidates,
+                                     const std::string& voice, bool schedule_prefetch = true);
+    void PrefetchWelcomeAudioTask();
+    bool IsWelcomeAudioCachedLocked(const std::string& cache_key, const std::string& voice) const;
+    bool StoreWelcomeAudioCache(const WelcomeAudioCandidate& candidate, std::vector<int16_t>&& pcm,
+                                int sample_rate);
+    bool TryPlayWelcomeAudioCache(const ConversationResponse& response);
+    bool PlayPcmAudio(std::vector<int16_t>&& pcm, int sample_rate);
     void LogWsOutputAudioConfig(const char* source, const WebSocketTransportConfig& config) const;
-    void ParseWsOutputAudioConfig(const cJSON* output_audio, WebSocketTransportConfig& config) const;
+    void ParseWsOutputAudioConfig(const cJSON* output_audio,
+                                  WebSocketTransportConfig& config) const;
     void ParseConversationTransport(const cJSON* root);
-    bool CheckHealth();
-    bool DeviceHello();
+    bool CheckHealth(bool set_error = true);
+    bool DeviceHello(bool set_error = true, bool schedule_welcome_prefetch = true,
+                     bool update_transport = true);
     bool StartConversation(const char* trigger = "manual");
     bool StartHttpConversationWithFreshHello(const char* trigger);
     bool OpenWebSocketConversation(const char* trigger);
@@ -275,7 +318,8 @@ private:
     bool IsWebSocketHeartbeatTimedOut() const;
     bool UploadPendingAudio();
     bool UploadPcmAudioForCurrentConversation(std::vector<int16_t>&& pcm);
-    bool UploadPcmAudioWebSocket(const std::vector<int16_t>& pcm, const std::string& conversation_id);
+    bool UploadPcmAudioWebSocket(const std::vector<int16_t>& pcm,
+                                 const std::string& conversation_id);
     UploadResult UploadPcmAudio(std::vector<int16_t>&& pcm, const std::string& conversation_id);
     bool RequestStandaloneTts(const std::string& text, StandaloneTtsResponse& response);
     bool UploadStandaloneAsrAudio(const std::string& wav, const std::string& prompt_text,
@@ -287,7 +331,8 @@ private:
     bool ParseStandaloneAsrResponse(const cJSON* root, StandaloneAsrResponse& response);
     std::string CreateWavFile(const std::vector<int16_t>& pcm, int sample_rate) const;
     bool ParsePcm16MonoBytes(const std::string& bytes, std::vector<int16_t>& pcm) const;
-    bool ParseWavPcm16Mono(const std::string& wav, std::vector<int16_t>& pcm, int& sample_rate) const;
+    bool ParseWavPcm16Mono(const std::string& wav, std::vector<int16_t>& pcm,
+                           int& sample_rate) const;
     bool DownloadWavAudio(const std::string& url, std::vector<int16_t>& pcm, int& sample_rate,
                           std::string* content_type = nullptr);
     bool ReadHttpBody(Http* http, std::string& body);
@@ -295,7 +340,8 @@ private:
     bool ClearServerEndedConversation(const char* reason);
     bool WaitForWsUrlAudioIfNeeded(int timeout_ms);
     bool HandleConversationResponse(const ConversationResponse& response, const char* fallback_text,
-                                    bool wait_for_playback = false, bool defer_tts_stop = false);
+                                    bool wait_for_playback = false, bool defer_tts_stop = false,
+                                    bool allow_welcome_audio_cache = false);
     void QueuePendingTtsStop(const std::string& text, bool continue_listening,
                              const char* end_reason = nullptr);
     void FlushPendingTtsStop();

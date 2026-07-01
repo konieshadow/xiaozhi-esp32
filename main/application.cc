@@ -375,6 +375,12 @@ void Application::HandleNetworkConnectedEvent() {
     ESP_LOGI(TAG, "Network connected");
     auto state = GetDeviceState();
 
+#if CONFIG_USE_KIDS_ENGLISH_SERVER
+    if (protocol_ != nullptr) {
+        static_cast<KidsEnglishProtocol*>(protocol_.get())->PrefetchWelcomeAudioAsync(true);
+    }
+#endif
+
     if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
         // Network is ready, start activation
         SetDeviceState(kDeviceStateActivating);
